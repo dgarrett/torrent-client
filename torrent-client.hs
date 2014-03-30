@@ -6,6 +6,7 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Char8 as BE
 import Data.BEncode
 import Data.Word
+import Data.Bits
 import qualified Data.Map as M
 import Network.HTTP
 import Network.URL
@@ -58,6 +59,9 @@ toWord16 = BL.foldl' (\x y -> x * 256 + fromIntegral y) 0
 
 toWord32 = BL.foldl' (\x y -> x * 256 + fromIntegral y) 0
 
+--to4Byte :: Int -> String
+to4Byte int = [ toEnum $ int `shift` (-8 * 3) .&. 0xff, toEnum $ int `shift` (-8 * 2) .&. 0xff, toEnum $ int `shift` (-8) .&. 0xff, toEnum $ int .&. 0xff ]
+
 peerToAddrInfo (addrBS, portBS) =
 	AddrInfo [] AF_INET Stream defaultProtocol (SockAddrInet port addr) Nothing
 	where
@@ -79,8 +83,14 @@ connectPeer serveraddr info_hash = do
 	putStrLn $ show line
 	return (handle, sock)
 
+bitfieldMsg handle = do
+	let length = 221
+	hPutStr handle $ (to4Byte (1 + length)) ++ [toEnum 5] ++ (take length $ repeat '\x0')
+	hFlush handle
+	putStrLn "bitfieldMsg"
+
 requestMsg handle = do
-	hPutStr handle $ (take 3 $ repeat $ toEnum 0) ++ [toEnum 13] ++ [toEnum 6] ++ (take 3 $ repeat $ toEnum 0) ++ [toEnum 0] ++ (take 2 $ repeat $ toEnum 0) ++ [toEnum (2^6)] ++ [toEnum 0]
+	hPutStr handle $ (to4Byte 13) ++ [toEnum 6] ++ (to4Byte 0) ++ (to4Byte 0) ++ (to4Byte (2^14))
 	hFlush handle
 	putStrLn "requestMsg waiting response"
 	--line <- hGetLine handle
@@ -90,22 +100,22 @@ requestMsg handle = do
 	--return msg
 
 chokeMsg handle = do
-	hPutStr handle $ (take 3 $ repeat $ toEnum 0) ++ [toEnum 1] ++ [toEnum 0]
+	hPutStr handle $ (to4Byte 1) ++ [toEnum 0]
 	hFlush handle
 	putStrLn "interestedMsg waiting response"
 
 unchokeMsg handle = do
-	hPutStr handle $ (take 3 $ repeat $ toEnum 0) ++ [toEnum 1] ++ [toEnum 1]
+	hPutStr handle $ (to4Byte 1) ++ [toEnum 1]
 	hFlush handle
 	putStrLn "interestedMsg waiting response"
 
 interestedMsg handle = do
-	hPutStr handle $ (take 3 $ repeat $ toEnum 0) ++ [toEnum 1] ++ [toEnum 2]
+	hPutStr handle $ (to4Byte 1) ++ [toEnum 2]
 	hFlush handle
 	putStrLn "interestedMsg waiting response"
 
 notinterestedMsg handle = do
-	hPutStr handle $ (take 3 $ repeat $ toEnum 0) ++ [toEnum 1] ++ [toEnum 3]
+	hPutStr handle $ (to4Byte 1) ++ [toEnum 3]
 	hFlush handle
 	putStrLn "interestedMsg waiting response"
 
@@ -135,6 +145,7 @@ handleMessage_ handle ('\4':xs) = do
 handleMessage_ handle ('\5':xs) = do
 	putStrLn "bitfield"
 	putStrLn $ show xs
+	putStrLn $ "length: " ++ (show $ length xs)
 
 handleMessage_ handle ('\6':xs) = do
 	putStrLn "request"
@@ -192,6 +203,8 @@ testLocalhost port = do
 	(handle, sock) <- connectPeer serveraddr $ BE.unpack info_hash
 	putStrLn "fork listen"
 	forkIO $ listenWith handle
+	putStrLn "bitfieldMsg"
+	bitfieldMsg handle
 	putStrLn "interestedMsg"
 	interestedMsg handle
 	--putStrLn "requestMsg"
