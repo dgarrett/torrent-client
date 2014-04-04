@@ -1,4 +1,5 @@
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 import qualified Data.ByteString as B
 import qualified Data.ByteString.UTF8 as BU
@@ -24,30 +25,33 @@ import Debug.Trace
 
 type BlockSize = Int
 
-data Block = Block { bOffset :: Int
-						, bSize :: BlockSize
-						} deriving (Eq, Show)
+data Block = Block { _bOffset :: Int
+						, _bSize :: BlockSize
+						} deriving (Eq, Show, Ord)
 
 type PieceNum = Integer
 type PieceSize = Integer
 
-data PieceInfo = PieceInfo { pOffset :: Integer
-								, pLength :: Integer
-								, pDigest :: BL.ByteString
-								, pState :: PieceState
+data PieceInfo = PieceInfo { _pOffset :: Integer
+								, _pLength :: Integer
+								, _pDigest :: BL.ByteString
+								, _pState :: PieceState
 								} deriving (Eq, Show)
 
 data PieceState = Pending
 				| Done
-				| InProgress { totalBlocks :: Int
-								, haveBlocks :: S.Set Block
-								, pendingBlocks :: [Block]
+				| InProgress { _totalBlocks :: Int
+								, _haveBlocks :: S.Set Block
+								, _pendingBlocks :: S.Set Block
 								} deriving (Eq, Show)
 
 type PieceMap = M.Map PieceNum PieceInfo
---type PieceDoneMap = M.Map PieceNum Bool
 
-pieceMap = newEmptyMVar
+makeLenses ''Block
+makeLenses ''PieceInfo
+makeLenses ''PieceState
+
+--type PieceDoneMap = M.Map PieceNum Bool
 
 {--data Torrent = Torrent
 	{ pieces :: M.Map PieceNum piece
@@ -79,6 +83,15 @@ mkPieceMap metainfo = do
 		where
 			f (pieceLength, remainingFileLength, index, map) hash = (nextPieceLength, remainingFileLength - pieceLength, index + 1, M.insert index (PieceInfo index pieceLength hash Pending) map)
 				where nextPieceLength = if pieceLength < remainingFileLength then pieceLength else remainingFileLength
+
+putPieceMap pieceMap pieceIndex offset block = do
+	let updated = M.update replacePiece pieceIndex pieceMap
+	return updated
+	where replacePiece piece = do
+		--Just $ set (pState . pendingBlocks) (S.delete (Block offset $ length block) $ view (pState . pendingBlocks) piece) piece
+		let piece' = over (pState . pendingBlocks) (S.delete (Block offset $ length block)) piece
+		Just $ over (pState . haveBlocks) (S.insert (Block offset $ length block)) piece
+
 
 openTorrent filename = do
 	fileContents <- BL.readFile filename
@@ -123,6 +136,9 @@ toWord32 = BL.foldl' (\x y -> x * 256 + fromIntegral y) 0
 --to4Byte :: Int -> String
 to4Byte int = [ toEnum $ int `shift` (-8 * 3) .&. 0xff, toEnum $ int `shift` (-8 * 2) .&. 0xff, toEnum $ int `shift` (-8) .&. 0xff, toEnum $ int .&. 0xff ]
 
+from4Byte :: (Enum a, Num b) => [a] -> b
+from4Byte str = foldl (\x y -> x * 256 + (fromIntegral . fromEnum) y) 0 str
+
 peerToAddrInfo (addrBS, portBS) =
 	AddrInfo [] AF_INET Stream defaultProtocol (SockAddrInet port addr) Nothing
 	where
@@ -150,8 +166,8 @@ bitfieldMsg handle = do
 	hFlush handle
 	putStrLn "bitfieldMsg"
 
-requestMsg handle = do
-	hPutStr handle $ (to4Byte 13) ++ [toEnum 6] ++ (to4Byte 0) ++ (to4Byte 0) ++ (to4Byte (2^14))
+requestMsg handle piece offset length = do
+	hPutStr handle $ (to4Byte 13) ++ [toEnum 6] ++ (to4Byte piece) ++ (to4Byte offset) ++ (to4Byte length) -- 2^14
 	hFlush handle
 	putStrLn "requestMsg waiting response"
 	--line <- hGetLine handle
@@ -180,10 +196,10 @@ notinterestedMsg handle = do
 	hFlush handle
 	putStrLn "interestedMsg waiting response"
 
-handleMessage_ handle [] = do
+handleMessage_ handle hFile [] pieceMap = do
 	putStrLn "keep alive"
 
-handleMessage_ handle (msg:xs)
+handleMessage_ handle hFile (msg:xs) pieceMap
 	| msg == choke = do
 		putStrLn "choke"
 		putStrLn xs
@@ -206,13 +222,21 @@ handleMessage_ handle (msg:xs)
 	| msg == request = do
 		putStrLn "request"
 		putStrLn xs
-	| msg == piece = do
+	| msg == piece = withMVar pieceMap $ \_pieceMap -> do
 		putStrLn "piece"
 		let (index, rest) = splitAt 4 xs
 		let (begin, block) = splitAt 4 rest
 		putStrLn $ "index: " ++ show index
 		putStrLn $ "begin: " ++ show begin
 		putStrLn $ show block
+		hSeek hFile AbsoluteSeek (from4Byte index + from4Byte begin)
+		hPutStr hFile block
+		hFlush hFile
+		let Just updated = putPieceMap _pieceMap (from4Byte index) (from4Byte begin) block
+		return updated
+		>> do
+			requestMsg handle 0 0 (2^14)
+			return ()
 	| msg == cancel = do
 		putStrLn "cancel"
 		putStrLn xs
@@ -220,15 +244,15 @@ handleMessage_ handle (msg:xs)
 		putStrLn $ "message type: " ++ show msg
 		putStrLn xs
 
-handleMessage handle = do
+handleMessage handle hFile pieceMap = do
 	sizeStr <- mapM hGetChar (replicate 4 handle)
 	let size = foldl (\x y -> x * 256 + fromEnum y) 0 sizeStr
 	msg <- mapM hGetChar (replicate size handle)
 	--putStrLn msg
-	handleMessage_ handle msg
+	handleMessage_ handle hFile msg pieceMap
 	return (size, msg)
 
-listenAt port_ = do
+{--listenAt port_ = do
 	let port = toEnum port_
 	lsock <- socket AF_INET Stream 0
 	bindSocket lsock $ SockAddrInet port iNADDR_ANY
@@ -246,14 +270,16 @@ listenAt port_ = do
 			--line <- hGetLine handle
 			--putStrLn $ show $ BE.pack line
 			loop lsock
+--}
 
-listenWith handle = do
-	handleMessage handle
-	listenWith handle
+listenWith handle hFile pieceMap = do
+	handleMessage handle hFile pieceMap
+	listenWith handle hFile pieceMap
 
 testLocalhost port = do
 	(torrent, url, rsp, trackerResp, peers) <- test
-	let Just pieceMap = mkPieceMap torrent
+	let Just _pieceMap = mkPieceMap torrent
+	pieceMap <- newMVar _pieceMap
 	hFile <- openBinaryFile "torrent" ReadWriteMode
 	let info_hash = SHA1.hash $ BL.toStrict $ bPack $ torrent M.! "info"
 	addrinfos <- getAddrInfo Nothing (Just "localhost") (Just port)
@@ -261,14 +287,14 @@ testLocalhost port = do
 	putStrLn "connectPeer"
 	(handle, sock) <- connectPeer serveraddr $ BE.unpack info_hash
 	putStrLn "fork listen"
-	forkIO $ listenWith handle
+	forkIO $ listenWith handle hFile pieceMap
 	--putStrLn "bitfieldMsg"
 	--bitfieldMsg handle
 	putStrLn "interestedMsg"
 	interestedMsg handle
 	--putStrLn "requestMsg"
 	--requestMsg handle
-	return handle
+	return (handle, pieceMap)
 
 test = do
 	torrent <- openTorrent "ubuntu-13.10-desktop-amd64.iso.torrent"
