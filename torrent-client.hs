@@ -8,6 +8,7 @@ import Data.BEncode
 import Data.Word
 import Data.Bits
 import qualified Data.Map as M
+import qualified Data.Set as S
 import Network.HTTP
 import Network.URL
 import Network.Socket
@@ -18,6 +19,52 @@ import Control.Applicative
 import System.IO
 import Control.Exception (finally)
 import Control.Concurrent --(forkIO)
+import Control.Lens
+import Debug.Trace
+
+type BlockSize = Int
+
+data Block = Block { bOffset :: Int
+						, bSize :: BlockSize
+						} deriving (Eq, Show)
+
+type PieceNum = Integer
+type PieceSize = Integer
+
+data PieceInfo = PieceInfo { pOffset :: Integer
+								, pLength :: Integer
+								, pDigest :: BL.ByteString
+								, pState :: PieceState
+								} deriving (Eq, Show)
+
+data PieceState = Pending
+				| Done
+				| InProgress { totalBlocks :: Int
+								, haveBlocks :: S.Set Block
+								, pendingBlocks :: [Block]
+								} deriving (Eq, Show)
+
+type PieceMap = M.Map PieceNum PieceInfo
+--type PieceDoneMap = M.Map PieceNum Bool
+
+{--data Torrent = Torrent
+	{ pieces :: M.Map PieceNum piece
+	}
+	--}
+
+createPieceMap :: M.Map String BEncode -> Maybe PieceMap
+createPieceMap metainfo = do
+	BDict info <- M.lookup "info" metainfo
+	BString pieces <- M.lookup "pieces" info
+	BInt pieceLength <- M.lookup "piece length" info
+	BInt fileLength <- M.lookup "length" info
+	let hashes = splitHashes pieces
+	let (_, _, _, pieceMap) = pieceMapList (pieceLength, fileLength, 0, M.fromList []) hashes
+	return pieceMap
+	where pieceMapList d@(pieceLength, fileLength, index, map) hashes = foldl f d hashes
+		where
+			f (pieceLength, remainingFileLength, index, map) hash = (nextPieceLength, remainingFileLength - pieceLength, index + 1, M.insert index (PieceInfo index pieceLength hash Pending) map)
+				where nextPieceLength = if pieceLength < remainingFileLength then pieceLength else remainingFileLength
 
 openTorrent filename = do
 	fileContents <- BL.readFile filename
@@ -74,18 +121,18 @@ connectPeer serveraddr info_hash = do
 	handle <- socketToHandle sock ReadWriteMode
 	hSetBuffering handle LineBuffering
 	--hPutStr handle $"BAL mySavings" ++ [toEnum 0]
-	hPutStr handle $ [toEnum 19] ++ "BitTorrent protocol" ++ (take 8 $ repeat $ toEnum 0) ++ info_hash ++ "Dylan" ++ (take 15 $ repeat $ toEnum 0)
+	hPutStr handle $ [toEnum 19] ++ "BitTorrent protocol" ++ (replicate 8 $ toEnum 0) ++ info_hash ++ "Dylan" ++ (replicate 15 $ toEnum 0)
 	--hPutStr handle $ "BitTorrent protocol" ++ info_hash ++ info_hash
 	hFlush handle
 	--line <- hGetLine handle
-	line <- mapM hGetChar (take 68 $ repeat handle)
+	line <- mapM hGetChar (replicate 68 $ handle)
 	putStrLn "handshake"
 	putStrLn $ show line
 	return (handle, sock)
 
 bitfieldMsg handle = do
 	let length = 221
-	hPutStr handle $ (to4Byte (1 + length)) ++ [toEnum 5] ++ (take length $ repeat '\x0')
+	hPutStr handle $ (to4Byte (1 + length)) ++ [toEnum 5] ++ (replicate length '\x0')
 	hFlush handle
 	putStrLn "bitfieldMsg"
 
@@ -153,7 +200,11 @@ handleMessage_ handle ('\6':xs) = do
 
 handleMessage_ handle ('\7':xs) = do
 	putStrLn "piece"
-	putStrLn $ show xs
+	let (index, rest) = splitAt 4 xs
+	let (begin, block) = splitAt 4 rest
+	putStrLn $ "index: " ++ show index
+	putStrLn $ "begin: " ++ show begin
+	putStrLn $ show block
 
 handleMessage_ handle ('\8':xs) = do
 	putStrLn "cancel"
@@ -164,9 +215,9 @@ handleMessage_ handle (msgtype:xs) = do
 	putStrLn xs
 
 handleMessage handle = do
-	sizeStr <- mapM hGetChar (take 4 $ repeat handle)
+	sizeStr <- mapM hGetChar (replicate 4 handle)
 	let size = foldl (\x y -> x * 256 + fromEnum y) 0 sizeStr
-	msg <- mapM hGetChar (take size $ repeat handle)
+	msg <- mapM hGetChar (replicate size handle)
 	--putStrLn msg
 	handleMessage_ handle msg
 	return (size, msg)
