@@ -47,13 +47,27 @@ data PieceState = Pending
 type PieceMap = M.Map PieceNum PieceInfo
 --type PieceDoneMap = M.Map PieceNum Bool
 
+pieceMap = newEmptyMVar
+
 {--data Torrent = Torrent
 	{ pieces :: M.Map PieceNum piece
 	}
 	--}
 
-createPieceMap :: M.Map String BEncode -> Maybe PieceMap
-createPieceMap metainfo = do
+-- Message types
+choke = '\0'
+unchoke = '\1'
+interested = '\2'
+notInterested = '\3'
+have = '\4'
+bitfield = '\5'
+request = '\6'
+piece = '\7'
+cancel = '\8'
+port = '\9'
+
+mkPieceMap :: M.Map String BEncode -> Maybe PieceMap
+mkPieceMap metainfo = do
 	BDict info <- M.lookup "info" metainfo
 	BString pieces <- M.lookup "pieces" info
 	BInt pieceLength <- M.lookup "piece length" info
@@ -169,50 +183,42 @@ notinterestedMsg handle = do
 handleMessage_ handle [] = do
 	putStrLn "keep alive"
 
-handleMessage_ handle ('\0':xs) = do
-	putStrLn "choke"
-	putStrLn xs
-
-handleMessage_ handle ('\1':xs) = do
-	putStrLn "unchoke"
-	putStrLn xs
-
-handleMessage_ handle ('\2':xs) = do
-	putStrLn "interested"
-	putStrLn xs
-
-handleMessage_ handle ('\3':xs) = do
-	putStrLn "not interested"
-	putStrLn xs
-
-handleMessage_ handle ('\4':xs) = do
-	putStrLn "have"
-	putStrLn $ show xs
-
-handleMessage_ handle ('\5':xs) = do
-	putStrLn "bitfield"
-	putStrLn $ show xs
-	putStrLn $ "length: " ++ (show $ length xs)
-
-handleMessage_ handle ('\6':xs) = do
-	putStrLn "request"
-	putStrLn xs
-
-handleMessage_ handle ('\7':xs) = do
-	putStrLn "piece"
-	let (index, rest) = splitAt 4 xs
-	let (begin, block) = splitAt 4 rest
-	putStrLn $ "index: " ++ show index
-	putStrLn $ "begin: " ++ show begin
-	putStrLn $ show block
-
-handleMessage_ handle ('\8':xs) = do
-	putStrLn "cancel"
-	putStrLn xs
-
-handleMessage_ handle (msgtype:xs) = do
-	putStrLn $ "message type: " ++ show msgtype
-	putStrLn xs
+handleMessage_ handle (msg:xs)
+	| msg == choke = do
+		putStrLn "choke"
+		putStrLn xs
+	| msg == unchoke = do
+		putStrLn "unchoke"
+		putStrLn xs
+	| msg == interested = do
+		putStrLn "interested"
+		putStrLn xs
+	| msg == notInterested = do
+		putStrLn "not interested"
+		putStrLn xs
+	| msg == have = do
+		putStrLn "have"
+		putStrLn $ show xs
+	| msg == bitfield = do
+		putStrLn "bitfield"
+		putStrLn $ show xs
+		putStrLn $ "length: " ++ (show $ length xs)
+	| msg == request = do
+		putStrLn "request"
+		putStrLn xs
+	| msg == piece = do
+		putStrLn "piece"
+		let (index, rest) = splitAt 4 xs
+		let (begin, block) = splitAt 4 rest
+		putStrLn $ "index: " ++ show index
+		putStrLn $ "begin: " ++ show begin
+		putStrLn $ show block
+	| msg == cancel = do
+		putStrLn "cancel"
+		putStrLn xs
+	| otherwise = do
+		putStrLn $ "message type: " ++ show msg
+		putStrLn xs
 
 handleMessage handle = do
 	sizeStr <- mapM hGetChar (replicate 4 handle)
@@ -247,6 +253,8 @@ listenWith handle = do
 
 testLocalhost port = do
 	(torrent, url, rsp, trackerResp, peers) <- test
+	let Just pieceMap = mkPieceMap torrent
+	hFile <- openBinaryFile "torrent" ReadWriteMode
 	let info_hash = SHA1.hash $ BL.toStrict $ bPack $ torrent M.! "info"
 	addrinfos <- getAddrInfo Nothing (Just "localhost") (Just port)
 	let serveraddr = addrinfos !! 3
@@ -254,8 +262,8 @@ testLocalhost port = do
 	(handle, sock) <- connectPeer serveraddr $ BE.unpack info_hash
 	putStrLn "fork listen"
 	forkIO $ listenWith handle
-	putStrLn "bitfieldMsg"
-	bitfieldMsg handle
+	--putStrLn "bitfieldMsg"
+	--bitfieldMsg handle
 	putStrLn "interestedMsg"
 	interestedMsg handle
 	--putStrLn "requestMsg"
