@@ -21,6 +21,7 @@ import System.IO
 import Control.Exception (finally)
 import Control.Concurrent --(forkIO)
 import Control.Lens
+import Control.Monad
 import Debug.Trace
 
 type BlockSize = Int
@@ -42,7 +43,8 @@ data PieceState = Pending
 				| Done
 				| InProgress { _totalBlocks :: Int
 								, _haveBlocks :: S.Set Block
-								, _pendingBlocks :: S.Set Block
+								, _unrequestedBlocks :: S.Set Block
+								, _requestedBlocks :: S.Set Block -- TODO add timeout timestamp
 								} deriving (Eq, Show)
 
 type PieceMap = M.Map PieceNum PieceInfo
@@ -50,6 +52,8 @@ type PieceMap = M.Map PieceNum PieceInfo
 makeLenses ''Block
 makeLenses ''PieceInfo
 makeLenses ''PieceState
+
+blockSize = 2^14
 
 --type PieceDoneMap = M.Map PieceNum Bool
 
@@ -88,10 +92,40 @@ putPieceMap pieceMap pieceIndex offset block = do
 	let updated = M.update replacePiece pieceIndex pieceMap
 	return updated
 	where replacePiece piece = do
-		--Just $ set (pState . pendingBlocks) (S.delete (Block offset $ length block) $ view (pState . pendingBlocks) piece) piece
-		let piece' = over (pState . pendingBlocks) (S.delete (Block offset $ length block)) piece
+		let piece' = over (pState . requestedBlocks) (S.delete (Block offset $ length block)) piece
 		Just $ over (pState . haveBlocks) (S.insert (Block offset $ length block)) piece
 
+getUnrequestedBlock :: PieceMap -> Maybe (Block, PieceNum, PieceMap)
+getUnrequestedBlock pieceMap = do
+	(block, key, newPiece) <- findBlock pieceMap (M.keys pieceMap)
+	let newMap = M.update (\_ -> Just $ over (pState . requestedBlocks) (S.insert block) newPiece) key pieceMap
+	return (block, key, newMap)
+	where
+		findBlock _ [] = Nothing
+		findBlock pieceMap (k:keys) = case do
+			piece <- M.lookup k pieceMap
+			let pieceSize = view pLength piece
+			let newPiece = over pState (\ps -> if ps == Pending then InProgress (ceiling $ (fromIntegral pieceSize) / (fromIntegral blockSize)) (S.fromList []) (mkBlockSet pieceSize blockSize) (S.fromList []) else ps) piece
+			let unreq = view (pState . unrequestedBlocks) newPiece
+			(block, newUnrequested) <- S.minView unreq
+			let newNewPiece = over (pState . unrequestedBlocks) (\_ -> newUnrequested) newPiece
+			return (block, k, newNewPiece)
+			of
+				Nothing -> findBlock pieceMap keys
+				x -> x
+			{--if not $ S.null (view (pState . unrequestedBlocks) piece) then (blockToRequest piece, k) else findBlock pieceMap keys
+		(block, )
+			where
+				Just piece = M.lookup k pieceMap
+				blockToRequest piece = S.minView $ view (pState. unrequestedBlocks) piece--}
+
+mkBlockSet :: PieceSize -> BlockSize -> S.Set Block
+mkBlockSet pieceSize blockSize = _mkBlockSet pieceSize blockSize 0
+	where
+		_mkBlockSet pieceSize blockSize offset
+			| pieceSize > 0 = S.union (S.fromList [Block offset (if blockSize < (fromIntegral pieceSize) then blockSize else (fromIntegral pieceSize))]) (_mkBlockSet (pieceSize - fromIntegral(blockSize)) blockSize (offset + 1))
+			| otherwise = S.fromList []
+--S.fromList $ map (\offset -> Block offset blockSize) [0..(totalBlocks - 1)]
 
 openTorrent filename = do
 	fileContents <- BL.readFile filename
@@ -196,6 +230,7 @@ notinterestedMsg handle = do
 	hFlush handle
 	putStrLn "interestedMsg waiting response"
 
+--handleMessage_ :: Handle -> Handle -> String -> PieceMap -> IO ()
 handleMessage_ handle hFile [] pieceMap = do
 	putStrLn "keep alive"
 
@@ -222,21 +257,34 @@ handleMessage_ handle hFile (msg:xs) pieceMap
 	| msg == request = do
 		putStrLn "request"
 		putStrLn xs
-	| msg == piece = withMVar pieceMap $ \_pieceMap -> do
+	| msg == piece = modifyMVar pieceMap $ \_pieceMap -> do
 		putStrLn "piece"
 		let (index, rest) = splitAt 4 xs
 		let (begin, block) = splitAt 4 rest
 		putStrLn $ "index: " ++ show index
 		putStrLn $ "begin: " ++ show begin
+		let Just p = M.lookup (from4Byte index) _pieceMap
+		let pieceLength = view pLength p
 		putStrLn $ show block
-		hSeek hFile AbsoluteSeek (from4Byte index + from4Byte begin)
+		hSeek hFile AbsoluteSeek ((from4Byte index)*pieceLength + from4Byte begin)
 		hPutStr hFile block
 		hFlush hFile
-		let Just updated = putPieceMap _pieceMap (from4Byte index) (from4Byte begin) block
-		return updated
-		>> do
-			requestMsg handle 0 0 (2^14)
-			return ()
+		--let Just updated = putPieceMap _pieceMap (from4Byte index) (from4Byte begin) block
+
+		let unreqBlock = getUnrequestedBlock _pieceMap
+		--let Just (newBlock, newPieceNum, newPieceMap) = getUnrequestedBlock _pieceMap
+		newPieceMap <- case unreqBlock of
+			Just (newBlock, newPieceNum, newPieceMap) -> do
+				let newOffset = view bOffset newBlock
+				let newLength = view bSize newBlock
+				trace ("pn: " ++ (show newPieceNum) ++ " off: " ++ (show newOffset)) (return ())
+				requestMsg handle (fromIntegral newPieceNum) newOffset newLength
+				return newPieceMap
+			_ -> return _pieceMap
+
+		return (newPieceMap, ())
+		-- >> do
+		--return ()
 	| msg == cancel = do
 		putStrLn "cancel"
 		putStrLn xs
@@ -245,12 +293,16 @@ handleMessage_ handle hFile (msg:xs) pieceMap
 		putStrLn xs
 
 handleMessage handle hFile pieceMap = do
-	sizeStr <- mapM hGetChar (replicate 4 handle)
-	let size = foldl (\x y -> x * 256 + fromEnum y) 0 sizeStr
-	msg <- mapM hGetChar (replicate size handle)
-	--putStrLn msg
-	handleMessage_ handle hFile msg pieceMap
-	return (size, msg)
+	eof <- hIsEOF handle
+	case eof of
+		False -> do
+			sizeStr <- mapM hGetChar (replicate 4 handle)
+			let size = foldl (\x y -> x * 256 + fromEnum y) 0 sizeStr
+			msg <- mapM hGetChar (replicate size handle)
+			--putStrLn msg
+			handleMessage_ handle hFile msg pieceMap
+			return (size, msg)
+		_ -> return (0, "")
 
 {--listenAt port_ = do
 	let port = toEnum port_
@@ -277,7 +329,8 @@ listenWith handle hFile pieceMap = do
 	listenWith handle hFile pieceMap
 
 testLocalhost port = do
-	(torrent, url, rsp, trackerResp, peers) <- test
+	--(torrent, url, rsp, trackerResp, peers) <- test
+	torrent <- test
 	let Just _pieceMap = mkPieceMap torrent
 	pieceMap <- newMVar _pieceMap
 	hFile <- openBinaryFile "torrent" ReadWriteMode
@@ -297,13 +350,13 @@ testLocalhost port = do
 	return (handle, pieceMap)
 
 test = do
-	torrent <- openTorrent "ubuntu-13.10-desktop-amd64.iso.torrent"
+	torrent <- openTorrent "testtxt.torrent"
 	let tracker = BU.toString $ BL.toStrict packed
 		where BString packed = torrent M.! "announce"
 	let info_hash = BE.unpack $ HU.urlEncode False $ SHA1.hash $ BL.toStrict $ bPack $ torrent M.! "info"
-	(url, rsp) <- connectTracker tracker info_hash
+	{--(url, rsp) <- connectTracker tracker info_hash
 	body <- getResponseBody rsp
 	let Just (BDict trackerResp) = trackerResponse body
 	let Just (BString peers) = M.lookup "peers" trackerResp
-	let peersAddrInfo = map peerToAddrInfo $ splitPeers peers
-	return (torrent, url, rsp, trackerResp, peersAddrInfo)
+	let peersAddrInfo = map peerToAddrInfo $ splitPeers peers--}
+	return (torrent)--, url, rsp, trackerResp, peersAddrInfo)
