@@ -86,7 +86,7 @@ mkPieceMap metainfo = do
 	where pieceMapList d@(pieceLength, fileLength, index, map) hashes = foldl f d hashes
 		where
 			f (pieceLength, remainingFileLength, index, map) hash = (nextPieceLength, remainingFileLength - pieceLength, index + 1, M.insert index (PieceInfo index pieceLength hash Pending) map)
-				where nextPieceLength = if pieceLength < remainingFileLength then pieceLength else remainingFileLength
+				where nextPieceLength = if pieceLength < (remainingFileLength - pieceLength) then pieceLength else (remainingFileLength - pieceLength)
 
 putPieceMap pieceMap pieceIndex offset block = do
 	let updated = M.update replacePiece pieceIndex pieceMap
@@ -263,15 +263,19 @@ handleMessage_ handle hFile (msg:xs) pieceMap
 		let (begin, block) = splitAt 4 rest
 		putStrLn $ "index: " ++ show index
 		putStrLn $ "begin: " ++ show begin
-		let Just p = M.lookup (from4Byte index) _pieceMap
-		let pieceLength = view pLength p
+		let Just firstPiece = M.lookup 0 _pieceMap --M.lookup (from4Byte index) _pieceMap
+		let pieceLength = view pLength firstPiece
 		putStrLn $ show block
+		putStrLn "block"
 		hSeek hFile AbsoluteSeek ((from4Byte index)*pieceLength + from4Byte begin)
+		putStrLn "seek"
 		hPutStr hFile block
+		putStrLn "write"
 		hFlush hFile
 		--let Just updated = putPieceMap _pieceMap (from4Byte index) (from4Byte begin) block
 
 		let unreqBlock = getUnrequestedBlock _pieceMap
+		putStrLn "unreq"
 		--let Just (newBlock, newPieceNum, newPieceMap) = getUnrequestedBlock _pieceMap
 		newPieceMap <- case unreqBlock of
 			Just (newBlock, newPieceNum, newPieceMap) -> do
@@ -281,7 +285,7 @@ handleMessage_ handle hFile (msg:xs) pieceMap
 				requestMsg handle (fromIntegral newPieceNum) newOffset newLength
 				return newPieceMap
 			_ -> return _pieceMap
-
+		putStrLn "done"
 		return (newPieceMap, ())
 		-- >> do
 		--return ()
@@ -301,8 +305,13 @@ handleMessage handle hFile pieceMap = do
 			msg <- mapM hGetChar (replicate size handle)
 			--putStrLn msg
 			handleMessage_ handle hFile msg pieceMap
-			return (size, msg)
-		_ -> return (0, "")
+			return True
+			--return (size, msg)
+		_ -> do
+			hFlush hFile
+			hClose hFile
+			putStrLn "=====================================EOF"
+			return False
 
 {--listenAt port_ = do
 	let port = toEnum port_
@@ -325,8 +334,12 @@ handleMessage handle hFile pieceMap = do
 --}
 
 listenWith handle hFile pieceMap = do
-	handleMessage handle hFile pieceMap
-	listenWith handle hFile pieceMap
+	cont <- handleMessage handle hFile pieceMap
+	if cont
+	then listenWith handle hFile pieceMap
+	else do
+		putStrLn "========================= listenWith done"
+		return ()
 
 testLocalhost port = do
 	--(torrent, url, rsp, trackerResp, peers) <- test
@@ -347,7 +360,7 @@ testLocalhost port = do
 	interestedMsg handle
 	--putStrLn "requestMsg"
 	--requestMsg handle
-	return (handle, pieceMap)
+	return (handle, pieceMap, torrent, hFile)
 
 test = do
 	torrent <- openTorrent "testtxt.torrent"
