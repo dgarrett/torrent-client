@@ -1,28 +1,28 @@
-{-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE ViewPatterns    #-}
 
-import qualified Data.ByteString as B
-import qualified Data.ByteString.UTF8 as BU
-import qualified Data.ByteString.Lazy as BL
-import qualified Data.ByteString.Char8 as BE
-import Data.BEncode
-import Data.Word
-import Data.Bits
-import qualified Data.Map as M
-import qualified Data.Set as S
-import Network.HTTP
-import Network.URL
-import Network.Socket
-import Network.BSD
-import Crypto.Hash.SHA1 as SHA1
+import           Control.Applicative
+import           Control.Concurrent
+import           Control.Exception      (finally)
+import           Control.Lens
+import           Control.Monad
+import           Crypto.Hash.SHA1       as SHA1
+import           Data.BEncode
+import           Data.Bits
+import qualified Data.ByteString        as B
+import qualified Data.ByteString.Char8  as BE
+import qualified Data.ByteString.Lazy   as BL
+import qualified Data.ByteString.UTF8   as BU
+import qualified Data.Map               as M
+import qualified Data.Set               as S
+import           Data.Word
+import           Debug.Trace
+import           Network.BSD
+import           Network.HTTP
 import qualified Network.HTTP.Types.URI as HU
-import Control.Applicative
-import System.IO
-import Control.Exception (finally)
-import Control.Concurrent --(forkIO)
-import Control.Lens
-import Control.Monad
-import Debug.Trace
+import           Network.Socket
+import           Network.URL
+import           System.IO
 
 type BlockSize = Int
 
@@ -265,17 +265,13 @@ handleMessage_ handle hFile (msg:xs) pieceMap
 		putStrLn $ "begin: " ++ show begin
 		let Just firstPiece = M.lookup 0 _pieceMap --M.lookup (from4Byte index) _pieceMap
 		let pieceLength = view pLength firstPiece
-		putStrLn $ show block
-		putStrLn "block"
+		--putStrLn $ show block
 		hSeek hFile AbsoluteSeek ((from4Byte index)*pieceLength + from4Byte begin)
-		putStrLn "seek"
 		hPutStr hFile block
-		putStrLn "write"
 		hFlush hFile
 		--let Just updated = putPieceMap _pieceMap (from4Byte index) (from4Byte begin) block
 
 		let unreqBlock = getUnrequestedBlock _pieceMap
-		putStrLn "unreq"
 		--let Just (newBlock, newPieceNum, newPieceMap) = getUnrequestedBlock _pieceMap
 		newPieceMap <- case unreqBlock of
 			Just (newBlock, newPieceNum, newPieceMap) -> do
@@ -285,7 +281,6 @@ handleMessage_ handle hFile (msg:xs) pieceMap
 				requestMsg handle (fromIntegral newPieceNum) newOffset newLength
 				return newPieceMap
 			_ -> return _pieceMap
-		putStrLn "done"
 		return (newPieceMap, ())
 		-- >> do
 		--return ()
@@ -363,7 +358,7 @@ testLocalhost port = do
 	return (handle, pieceMap, torrent, hFile)
 
 test = do
-	torrent <- openTorrent "testtxt.torrent"
+	torrent <- openTorrent "ubuntu-13.10-desktop-amd64.iso.torrent"
 	let tracker = BU.toString $ BL.toStrict packed
 		where BString packed = torrent M.! "announce"
 	let info_hash = BE.unpack $ HU.urlEncode False $ SHA1.hash $ BL.toStrict $ bPack $ torrent M.! "info"
