@@ -53,7 +53,7 @@ makeLenses ''Block
 makeLenses ''PieceInfo
 makeLenses ''PieceState
 
-blockSize = 2^14
+defaultBlockSize = 2^14
 
 --type PieceDoneMap = M.Map PieceNum Bool
 
@@ -93,7 +93,7 @@ putPieceMap pieceMap pieceIndex offset block = do
 	return updated
 	where replacePiece piece = do
 		let piece' = over (pState . requestedBlocks) (S.delete (Block offset $ length block)) piece
-		Just $ over (pState . haveBlocks) (S.insert (Block offset $ length block)) piece
+		Just $ over (pState . haveBlocks) (S.insert (Block (offset*defaultBlockSize) $ length block)) piece
 
 getUnrequestedBlock :: PieceMap -> Maybe (Block, PieceNum, PieceMap)
 getUnrequestedBlock pieceMap = do
@@ -105,7 +105,7 @@ getUnrequestedBlock pieceMap = do
 		findBlock pieceMap (k:keys) = case do
 			piece <- M.lookup k pieceMap
 			let pieceSize = view pLength piece
-			let newPiece = over pState (\ps -> if ps == Pending then InProgress (ceiling $ (fromIntegral pieceSize) / (fromIntegral blockSize)) (S.fromList []) (mkBlockSet pieceSize blockSize) (S.fromList []) else ps) piece
+			let newPiece = over pState (\ps -> if ps == Pending then InProgress (ceiling $ (fromIntegral pieceSize) / (fromIntegral defaultBlockSize)) (S.fromList []) (mkBlockSet pieceSize defaultBlockSize) (S.fromList []) else ps) piece
 			let unreq = view (pState . unrequestedBlocks) newPiece
 			(block, newUnrequested) <- S.minView unreq
 			let newNewPiece = over (pState . unrequestedBlocks) (\_ -> newUnrequested) newPiece
@@ -123,7 +123,7 @@ mkBlockSet :: PieceSize -> BlockSize -> S.Set Block
 mkBlockSet pieceSize blockSize = _mkBlockSet pieceSize blockSize 0
 	where
 		_mkBlockSet pieceSize blockSize offset
-			| pieceSize > 0 = S.union (S.fromList [Block offset (if blockSize < (fromIntegral pieceSize) then blockSize else (fromIntegral pieceSize))]) (_mkBlockSet (pieceSize - fromIntegral(blockSize)) blockSize (offset + 1))
+			| pieceSize > 0 = S.union (S.fromList [Block (offset*defaultBlockSize) (if blockSize < (fromIntegral pieceSize) then blockSize else (fromIntegral pieceSize))]) (_mkBlockSet (pieceSize - fromIntegral(blockSize)) blockSize (offset + 1))
 			| otherwise = S.fromList []
 --S.fromList $ map (\offset -> Block offset blockSize) [0..(totalBlocks - 1)]
 
@@ -261,12 +261,14 @@ handleMessage_ handle hFile (msg:xs) pieceMap
 		putStrLn "piece"
 		let (index, rest) = splitAt 4 xs
 		let (begin, block) = splitAt 4 rest
-		putStrLn $ "index: " ++ show index
-		putStrLn $ "begin: " ++ show begin
+		putStrLn $ "index: " ++ show (from4Byte index)
+		putStrLn $ "begin: " ++ show (from4Byte begin)
+		putStrLn $ "length: " ++ show (length block)
 		let Just firstPiece = M.lookup 0 _pieceMap --M.lookup (from4Byte index) _pieceMap
 		let pieceLength = view pLength firstPiece
 		--putStrLn $ show block
 		hSeek hFile AbsoluteSeek ((from4Byte index)*pieceLength + from4Byte begin)
+		putStrLn $ "Seek to: " ++ (show ((from4Byte index)*pieceLength + from4Byte begin))
 		hPutStr hFile block
 		hFlush hFile
 		--let Just updated = putPieceMap _pieceMap (from4Byte index) (from4Byte begin) block
