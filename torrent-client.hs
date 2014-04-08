@@ -176,8 +176,8 @@ from4Byte str = foldl (\x y -> x * 256 + (fromIntegral . fromEnum) y) 0 str
 peerToAddrInfo (addrBS, portBS) =
 	AddrInfo [] AF_INET Stream defaultProtocol (SockAddrInet port addr) Nothing
 	where
-		addr = toWord32 addrBS
-		port = toWord16 portBS
+		addr = toWord32 $ BL.reverse addrBS
+		port = toWord16 $ portBS
 
 connectPeer serveraddr info_hash = do
 	sock <- socket (addrFamily serveraddr) Stream defaultProtocol -- (getProtocolNumber "tcp")
@@ -210,6 +210,11 @@ requestMsg handle piece offset length = do
 	--mapM handleMessage (take 40 $ repeat handle)
 	--return msg
 
+keepAliveMsg handle = do
+	hPutStr handle (to4Byte 0)
+	hFlush handle
+	putStrLn "send: keep-alive"
+
 chokeMsg handle = do
 	hPutStr handle $ (to4Byte 1) ++ [toEnum 0]
 	hFlush handle
@@ -233,6 +238,7 @@ notinterestedMsg handle = do
 --handleMessage_ :: Handle -> Handle -> String -> PieceMap -> IO ()
 handleMessage_ handle hFile [] pieceMap = do
 	putStrLn "keep alive"
+	keepAliveMsg handle
 
 handleMessage_ handle hFile (msg:xs) pieceMap
 	| msg == choke = do
@@ -338,9 +344,31 @@ listenWith handle hFile pieceMap = do
 		putStrLn "========================= listenWith done"
 		return ()
 
+testAddressIndex i = do
+	(torrent, url, rsp, trackerResp, peers) <- test
+	--torrent <- test
+	let Just _pieceMap = mkPieceMap torrent
+	pieceMap <- newMVar _pieceMap
+	
+	let info_hash = SHA1.hash $ BL.toStrict $ bPack $ torrent M.! "info"
+	--addrinfos <- getAddrInfo Nothing (Just "localhost") (Just port)
+	--let serveraddr = addrinfos !! 3
+	putStrLn $ "connectPeer: " ++ (show (peers !! i))
+	(handle, sock) <- connectPeer (peers !! i) $ BE.unpack info_hash
+	hFile <- openBinaryFile "torrent" ReadWriteMode
+	putStrLn "fork listen"
+	forkIO $ listenWith handle hFile pieceMap
+	--putStrLn "bitfieldMsg"
+	--bitfieldMsg handle
+	putStrLn "interestedMsg"
+	interestedMsg handle
+	--putStrLn "requestMsg"
+	--requestMsg handle
+	return (handle, pieceMap, torrent, hFile)
+
 testLocalhost port = do
-	--(torrent, url, rsp, trackerResp, peers) <- test
-	torrent <- test
+	(torrent, url, rsp, trackerResp, peers) <- test
+	--torrent <- test
 	let Just _pieceMap = mkPieceMap torrent
 	pieceMap <- newMVar _pieceMap
 	hFile <- openBinaryFile "torrent" ReadWriteMode
@@ -360,13 +388,13 @@ testLocalhost port = do
 	return (handle, pieceMap, torrent, hFile)
 
 test = do
-	torrent <- openTorrent "ubuntu-13.10-desktop-amd64.iso.torrent"
+	torrent <- openTorrent "Interview_Franziska_Heine.ogg.torrent"
 	let tracker = BU.toString $ BL.toStrict packed
 		where BString packed = torrent M.! "announce"
 	let info_hash = BE.unpack $ HU.urlEncode False $ SHA1.hash $ BL.toStrict $ bPack $ torrent M.! "info"
-	{--(url, rsp) <- connectTracker tracker info_hash
+	(url, rsp) <- connectTracker tracker info_hash
 	body <- getResponseBody rsp
 	let Just (BDict trackerResp) = trackerResponse body
 	let Just (BString peers) = M.lookup "peers" trackerResp
-	let peersAddrInfo = map peerToAddrInfo $ splitPeers peers--}
-	return (torrent)--, url, rsp, trackerResp, peersAddrInfo)
+	let peersAddrInfo = map peerToAddrInfo $ splitPeers peers
+	return (torrent, url, rsp, trackerResp, peersAddrInfo)
