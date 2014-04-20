@@ -48,6 +48,7 @@ data PieceState = Pending
 								} deriving (Eq, Show)
 
 type PieceMap = M.Map PieceNum PieceInfo
+type PieceHashesMap = M.Map PieceNum BL.ByteString
 
 makeLenses ''Block
 makeLenses ''PieceInfo
@@ -93,7 +94,7 @@ putPieceMap pieceMap pieceIndex offset block = do
 	return updated
 	where replacePiece piece = do
 		let piece' = over (pState . requestedBlocks) (S.delete (Block offset $ length block)) piece
-		Just $ over (pState . haveBlocks) (S.insert (Block (offset*defaultBlockSize) $ length block)) piece
+		Just $ over (pState . haveBlocks) (S.insert (Block (offset*defaultBlockSize) $ length block)) piece'
 
 getUnrequestedBlock :: PieceMap -> Maybe (Block, PieceNum, PieceMap)
 getUnrequestedBlock pieceMap = do
@@ -118,6 +119,25 @@ getUnrequestedBlock pieceMap = do
 			where
 				Just piece = M.lookup k pieceMap
 				blockToRequest piece = S.minView $ view (pState. unrequestedBlocks) piece--}
+
+receiveBlock :: PieceMap -> PieceNum -> Block -> (PieceMap, Bool)
+receiveBlock pieceMap pieceNum block = (updatedPieceMap, needToCheckHash)
+	where
+		updatedPieceMap = M.update updateFunc pieceNum pieceMap
+		updateFunc = moveBlockToHave block
+		moveBlockToHave block piece = do
+			let piece' = over (pState . requestedBlocks) (S.delete block) piece
+			Just $ over (pState . haveBlocks) (S.insert block) piece'
+		Just updatingBlock = M.lookup pieceNum updatedPieceMap
+		needToCheckHash = (S.null $ view (pState . requestedBlocks) updatingBlock) && (S.null $ view (pState . unrequestedBlocks) updatingBlock)
+
+needToCheckHash pieceMap pieceNum = (S.null $ view (pState . requestedBlocks) updatingBlock) && (S.null $ view (pState . unrequestedBlocks) updatingBlock)
+	where
+		Just updatingBlock = M.lookup pieceNum pieceMap
+
+pieceSize piece = (S.foldl sum 0 $ view (pState . haveBlocks) piece) + (S.foldl sum 0 $ view (pState . unrequestedBlocks) piece) + (S.foldl sum 0 $ view (pState . requestedBlocks) piece)
+	where
+		sum s b = s + (view bSize b)
 
 mkBlockSet :: PieceSize -> BlockSize -> S.Set Block
 mkBlockSet pieceSize blockSize = _mkBlockSet pieceSize blockSize 0
@@ -279,7 +299,29 @@ handleMessage_ handle hFile (msg:xs) pieceMap
 		hFlush hFile
 		--let Just updated = putPieceMap _pieceMap (from4Byte index) (from4Byte begin) block
 
-		let unreqBlock = getUnrequestedBlock _pieceMap
+		-- Check piece if necessary
+		let (__pieceMap, _) = receiveBlock _pieceMap (from4Byte index) (Block (from4Byte begin) (length block))
+		putStrLn $ "needToCheckHash: " ++ (show $ needToCheckHash __pieceMap (from4Byte index))
+		___pieceMap <- if (needToCheckHash __pieceMap (from4Byte index))
+			then do
+				hSeek hFile AbsoluteSeek ((from4Byte index)*pieceLength)
+				let Just thisPiece = M.lookup (from4Byte index) _pieceMap
+				pieceContents <- mapM hGetChar $ replicate (pieceSize thisPiece) hFile
+				let hash = SHA1.hash $ BE.pack pieceContents
+				putStrLn $ "=======hash: " ++ (BE.unpack $ HU.urlEncode False hash)
+				let correctHash = view pDigest thisPiece
+				let matches = (BL.toStrict correctHash) == hash
+				putStrLn $ "========= correct: " ++ (show matches)
+				return $ if matches
+					then
+						M.update (\p -> Just $ set pState Main.Done p) (from4Byte index) __pieceMap
+					else
+						M.update (\p -> Just $ set pState Main.Pending p) (from4Byte index) __pieceMap
+				--return __pieceMap
+			else
+				return __pieceMap
+
+		let unreqBlock = getUnrequestedBlock ___pieceMap
 		--let Just (newBlock, newPieceNum, newPieceMap) = getUnrequestedBlock _pieceMap
 		newPieceMap <- case unreqBlock of
 			Just (newBlock, newPieceNum, newPieceMap) -> do
@@ -344,6 +386,23 @@ listenWith handle hFile pieceMap = do
 		putStrLn "========================= listenWith done"
 		return ()
 
+startDownload :: Handle -> MVar PieceMap -> Int -> IO ()
+startDownload handle pieceMap parallelRequests = modifyMVar_ pieceMap $ \_pieceMap -> do
+	foldl f (return _pieceMap) [1..parallelRequests]
+	where
+		f pieceMap _ = do
+			_pieceMap <- pieceMap
+			let unreqBlock = getUnrequestedBlock _pieceMap
+			newPieceMap <- case unreqBlock of
+				Just (newBlock, newPieceNum, newPieceMap) -> do
+					let newOffset = view bOffset newBlock
+					let newLength = view bSize newBlock
+					trace ("pn: " ++ (show newPieceNum) ++ " off: " ++ (show newOffset)) (return ())
+					requestMsg handle (fromIntegral newPieceNum) newOffset newLength
+					return newPieceMap
+				_ -> return _pieceMap
+			return newPieceMap
+
 testAddressIndex i = do
 	(torrent, url, rsp, trackerResp, peers) <- test
 	--torrent <- test
@@ -364,7 +423,7 @@ testAddressIndex i = do
 	interestedMsg handle
 	--putStrLn "requestMsg"
 	--requestMsg handle
-	return (handle, pieceMap, torrent, hFile)
+	return (handle, pieceMap, torrent, hFile, peers)
 
 testLocalhost port = do
 	(torrent, url, rsp, trackerResp, peers) <- test
