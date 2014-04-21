@@ -131,9 +131,11 @@ receiveBlock pieceMap pieceNum block = (updatedPieceMap, needToCheckHash)
 		Just updatingBlock = M.lookup pieceNum updatedPieceMap
 		needToCheckHash = (S.null $ view (pState . requestedBlocks) updatingBlock) && (S.null $ view (pState . unrequestedBlocks) updatingBlock)
 
+{-
 needToCheckHash pieceMap pieceNum = (S.null $ view (pState . requestedBlocks) updatingBlock) && (S.null $ view (pState . unrequestedBlocks) updatingBlock)
 	where
 		Just updatingBlock = M.lookup pieceNum pieceMap
+-}
 
 pieceSize piece = (S.foldl sum 0 $ view (pState . haveBlocks) piece) + (S.foldl sum 0 $ view (pState . unrequestedBlocks) piece) + (S.foldl sum 0 $ view (pState . requestedBlocks) piece)
 	where
@@ -283,7 +285,7 @@ handleMessage_ handle hFile (msg:xs) pieceMap
 	| msg == request = do
 		putStrLn "request"
 		putStrLn xs
-	| msg == piece = modifyMVar pieceMap $ \_pieceMap -> do
+	| msg == piece = modifyMVar_ pieceMap $ \_pieceMap -> do
 		putStrLn "piece"
 		let (index, rest) = splitAt 4 xs
 		let (begin, block) = splitAt 4 rest
@@ -300,9 +302,9 @@ handleMessage_ handle hFile (msg:xs) pieceMap
 		--let Just updated = putPieceMap _pieceMap (from4Byte index) (from4Byte begin) block
 
 		-- Check piece if necessary
-		let (__pieceMap, _) = receiveBlock _pieceMap (from4Byte index) (Block (from4Byte begin) (length block))
-		putStrLn $ "needToCheckHash: " ++ (show $ needToCheckHash __pieceMap (from4Byte index))
-		___pieceMap <- if (needToCheckHash __pieceMap (from4Byte index))
+		let (__pieceMap, needToCheckHash) = receiveBlock _pieceMap (from4Byte index) (Block (from4Byte begin) (length block))
+		putStrLn $ "needToCheckHash: " ++ (show needToCheckHash)
+		___pieceMap <- if needToCheckHash
 			then do
 				hSeek hFile AbsoluteSeek ((from4Byte index)*pieceLength)
 				let Just thisPiece = M.lookup (from4Byte index) _pieceMap
@@ -330,8 +332,8 @@ handleMessage_ handle hFile (msg:xs) pieceMap
 				trace ("pn: " ++ (show newPieceNum) ++ " off: " ++ (show newOffset)) (return ())
 				requestMsg handle (fromIntegral newPieceNum) newOffset newLength
 				return newPieceMap
-			_ -> return _pieceMap
-		return (newPieceMap, ())
+			_ -> return ___pieceMap
+		return newPieceMap
 		-- >> do
 		--return ()
 	| msg == cancel = do
