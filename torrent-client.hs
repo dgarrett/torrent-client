@@ -86,27 +86,32 @@ resumePieceMap pieceMap hFile = do
 	let Just firstPiece = M.lookup 0 pieceMap
 	let pieceLength = view pLength firstPiece
 	fileSize <- hFileSize hFile
-	F.foldlM (checkPiece hFile pieceLength fileSize) pieceMap pieceMap
+	fileContents <- hGetContents hFile
+	(result, _) <- F.foldlM (checkPiece hFile pieceLength fileSize) (pieceMap, fileContents) pieceMap
+	return result
 	where
-		checkPiece hFile pieceLength fileSize pieceMap piece = do
+		checkPiece _ _ _ (pieceMap, []) _ = return (pieceMap, [])
+		checkPiece hFile pieceLength fileSize (pieceMap, fileContents) piece = do
 			let percentChecked = (fromIntegral $ (view pOffset piece)*pieceLength) / (fromIntegral fileSize)
-			when (percentChecked <= 1) $ putStrLn $ "Resuming: " ++ (show percentChecked)
-			hSeek hFile AbsoluteSeek ((view pOffset piece)*pieceLength)
+			when (percentChecked <= 1) $ putStrLn $ "Resuming: " ++ (show $ 100 * percentChecked) ++ "%"
+			{-hSeek hFile AbsoluteSeek ((view pOffset piece)*pieceLength)
 			eof <- hIsEOF hFile
 			if eof
 				then do
-					return $ M.update (\p -> Just $ set pState Main.Pending p) (view pOffset piece) pieceMap
-				else do
-					pieceContents <- mapM hGetCharSafe $ replicate (fromIntegral $ view pLength piece) hFile
-					let hash = SHA1.hash $ BE.pack pieceContents
-					let correctHash = view pDigest piece
-					let matches = (BL.toStrict correctHash) == hash
+					return ((M.update (\p -> Just $ set pState Main.Pending p) (view pOffset piece) pieceMap), fileContents)
+				else do-}
+			--pieceContents <- mapM hGetCharSafe $ replicate (fromIntegral $ view pLength piece) hFile
+			let (pieceContents, remainingContents) = splitAt (fromIntegral $ view pLength piece) fileContents
+			let hash = SHA1.hash $ BE.pack pieceContents
+			let correctHash = view pDigest piece
+			let matches = (BL.toStrict correctHash) == hash
 
-					return $ if matches
-						then
-							M.update (\p -> Just $ set pState Main.Done p) (view pOffset piece) pieceMap
-						else
-							M.update (\p -> Just $ set pState Main.Pending p) (view pOffset piece) pieceMap
+			let updateAction = if matches
+				then
+					M.update (\p -> Just $ set pState Main.Done p) (view pOffset piece) pieceMap
+				else
+					M.update (\p -> Just $ set pState Main.Pending p) (view pOffset piece) pieceMap
+			return (updateAction, remainingContents)
 
 mkPieceMap :: M.Map String BEncode -> Maybe PieceMap
 mkPieceMap metainfo = do
@@ -395,8 +400,8 @@ handleMessage_ handle hFile (msg:xs) pieceMap
 				forkIO $ return ()
 		-}
 
-		putStrLn $ "Percent complete: " ++ (show (100 * (fromIntegral $ bytesComplete ___pieceMap) / (fromIntegral $ bytesTotal ___pieceMap)))
-		putStrLn $ "Percent complete (with unverified): " ++ (show (100 * ((fromIntegral $ bytesComplete ___pieceMap) + (fromIntegral $ bytesUnverified ___pieceMap)) / (fromIntegral $ bytesTotal ___pieceMap)))
+		putStrLn $ "Percent complete: " ++ (show (100 * (fromIntegral $ bytesComplete ___pieceMap) / (fromIntegral $ bytesTotal ___pieceMap))) ++ "%"
+		putStrLn $ "Percent complete (with unverified): " ++ (show (100 * ((fromIntegral $ bytesComplete ___pieceMap) + (fromIntegral $ bytesUnverified ___pieceMap)) / (fromIntegral $ bytesTotal ___pieceMap))) ++ "%"
 
 		let unreqBlock = getUnrequestedBlock ___pieceMap
 		--let Just (newBlock, newPieceNum, newPieceMap) = getUnrequestedBlock _pieceMap
