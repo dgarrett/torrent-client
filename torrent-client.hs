@@ -107,6 +107,7 @@ resumePieceMap pieceMap hFile = do
 			let hash = SHA1.hash $ BE.pack pieceContents
 			let correctHash = view pDigest piece
 			let matches = (BL.toStrict correctHash) == hash
+			remainingContents `seq` return () -- strictness bug
 
 			let updateAction = if matches
 				then
@@ -114,6 +115,22 @@ resumePieceMap pieceMap hFile = do
 				else
 					M.update (\p -> Just $ set pState Main.Pending p) (view pOffset piece) pieceMap
 			return (updateAction, remainingContents)
+
+mkBitfield :: PieceMap -> String
+mkBitfield pieceMap = reverse $ f (reverse _bits) []
+	where
+		f [] current = current
+		f bits current = f rest ((toEnum (pack byte 0) :: Char):current)
+			where
+				(byte,_rest) = splitAt 8 bits
+				rest = if ((length _rest) < 8 && (length _rest) > 0) then _rest ++ (replicate (8 - (length _rest)) False) else _rest
+		pack :: [Bool] -> Int -> Int
+		pack [] char = char
+		pack (b:bits) char = pack bits $ (char `shift` 1) .|. (fromBool b)
+		_bits = M.foldl (\x p -> ((view pState p) == Main.Done):x) [] pieceMap
+		fromBool :: Bool -> Int
+		fromBool True = 1
+		fromBool False = 0
 
 mkPieceMap :: M.Map String BEncode -> Maybe PieceMap
 mkPieceMap metainfo = do
@@ -267,9 +284,12 @@ connectPeer serveraddr info_hash = do
 	putStrLn $ show line
 	return (handle, sock)
 
-bitfieldMsg handle = do
-	let length = 221
-	hPutStr handle $ (to4Byte (1 + length)) ++ [toEnum 5] ++ (replicate length '\x0')
+bitfieldMsg handle bitfield = do
+	--let length = 221
+	--hPutStr handle $ (to4Byte (1 + length)) ++ [toEnum 5] ++ (replicate length '\x0')
+	let msgLength = length bitfield
+	hPutStr handle $ (to4Byte (1 + msgLength)) ++ [toEnum 5] ++ bitfield
+	putStrLn $ show bitfield
 	hFlush handle
 	putStrLn "bitfieldMsg"
 
@@ -339,6 +359,8 @@ handleMessage_ handle hFile (msg:xs) pieceMap
 		putStrLn "bitfield"
 		putStrLn $ show xs
 		putStrLn $ "length: " ++ (show $ length xs)
+		_bitfield <- withMVar pieceMap $ (return . mkBitfield)
+		bitfieldMsg handle _bitfield
 		interestedMsg handle
 	| msg == request = do
 		putStrLn "request"
