@@ -13,6 +13,7 @@ import qualified Data.ByteString        as B
 import qualified Data.ByteString.Char8  as BE
 import qualified Data.ByteString.Lazy   as BL
 import qualified Data.ByteString.UTF8   as BU
+import qualified Data.Foldable          as F
 import qualified Data.Map               as M
 import qualified Data.Set               as S
 import           Data.Word
@@ -75,6 +76,25 @@ piece = '\7'
 cancel = '\8'
 port = '\9'
 
+resumePieceMap :: PieceMap -> Handle -> IO (PieceMap)
+resumePieceMap pieceMap hFile = do
+	let Just firstPiece = M.lookup 0 pieceMap
+	let pieceLength = view pLength firstPiece
+	F.foldlM (checkPiece hFile pieceLength) pieceMap pieceMap
+	where
+		checkPiece hFile pieceLength pieceMap piece = do
+			hSeek hFile AbsoluteSeek ((view pOffset piece)*pieceLength)
+			pieceContents <- mapM hGetChar $ replicate (fromIntegral $ view pLength piece) hFile
+			let hash = SHA1.hash $ BE.pack pieceContents
+			let correctHash = view pDigest piece
+			let matches = (BL.toStrict correctHash) == hash
+
+			return $ if matches
+				then
+					M.update (\p -> Just $ set pState Main.Done p) (view pOffset piece) pieceMap
+				else
+					M.update (\p -> Just $ set pState Main.Pending p) (view pOffset piece) pieceMap
+
 mkPieceMap :: M.Map String BEncode -> Maybe PieceMap
 mkPieceMap metainfo = do
 	BDict info <- M.lookup "info" metainfo
@@ -130,6 +150,17 @@ receiveBlock pieceMap pieceNum block = (updatedPieceMap, needToCheckHash)
 			Just $ over (pState . haveBlocks) (S.insert block) piece'
 		Just updatingBlock = M.lookup pieceNum updatedPieceMap
 		needToCheckHash = (S.null $ view (pState . requestedBlocks) updatingBlock) && (S.null $ view (pState . unrequestedBlocks) updatingBlock)
+
+bytesTotal pieceMap = M.foldl (\x pi -> x + (view pLength pi)) 0 pieceMap
+
+bytesComplete pieceMap = M.foldl (\x pi -> if ((view pState pi) == Main.Done) then x + (view pLength pi) else x) 0 pieceMap
+
+bytesUnverified pieceMap = M.foldl f 0 pieceMap
+	where
+		f x pi = if (isInProgress $ view pState pi) then x + (sumBlocksSize (view (pState . haveBlocks) pi)) else x
+		isInProgress (InProgress _ _ _ _) = True
+		isInProgress _ = False
+		sumBlocksSize blocks = S.foldl (\x b -> x + (view bSize b)) 0 blocks
 
 {-
 needToCheckHash pieceMap pieceNum = (S.null $ view (pState . requestedBlocks) updatingBlock) && (S.null $ view (pState . unrequestedBlocks) updatingBlock)
@@ -310,10 +341,11 @@ handleMessage_ handle hFile (msg:xs) pieceMap
 				let Just thisPiece = M.lookup (from4Byte index) _pieceMap
 				pieceContents <- mapM hGetChar $ replicate (pieceSize thisPiece) hFile
 				let hash = SHA1.hash $ BE.pack pieceContents
-				putStrLn $ "=======hash: " ++ (BE.unpack $ HU.urlEncode False hash)
+				--putStrLn $ "=======hash: " ++ (BE.unpack $ HU.urlEncode False hash)
 				let correctHash = view pDigest thisPiece
 				let matches = (BL.toStrict correctHash) == hash
-				putStrLn $ "========= correct: " ++ (show matches)
+				--putStrLn $ "========= correct: " ++ (show matches)
+
 				return $ if matches
 					then
 						M.update (\p -> Just $ set pState Main.Done p) (from4Byte index) __pieceMap
@@ -322,6 +354,9 @@ handleMessage_ handle hFile (msg:xs) pieceMap
 				--return __pieceMap
 			else
 				return __pieceMap
+
+		putStrLn $ "Percent complete: " ++ (show (100 * (fromIntegral $ bytesComplete ___pieceMap) / (fromIntegral $ bytesTotal ___pieceMap)))
+		putStrLn $ "Percent complete (with unverified): " ++ (show (100 * ((fromIntegral $ bytesComplete ___pieceMap) + (fromIntegral $ bytesUnverified ___pieceMap)) / (fromIntegral $ bytesTotal ___pieceMap)))
 
 		let unreqBlock = getUnrequestedBlock ___pieceMap
 		--let Just (newBlock, newPieceNum, newPieceMap) = getUnrequestedBlock _pieceMap
