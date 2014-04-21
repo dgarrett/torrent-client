@@ -1,3 +1,5 @@
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE DoAndIfThenElse #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE ViewPatterns    #-}
 
@@ -87,11 +89,11 @@ resumePieceMap pieceMap hFile = do
 	let pieceLength = view pLength firstPiece
 	fileSize <- hFileSize hFile
 	fileContents <- hGetContents hFile
-	(result, _) <- F.foldlM (checkPiece hFile pieceLength fileSize) (pieceMap, fileContents) pieceMap
+	(result, _) <- F.foldlM (checkPiece pieceLength fileSize) (pieceMap, fileContents) pieceMap
 	return result
 	where
-		checkPiece _ _ _ (pieceMap, []) _ = return (pieceMap, [])
-		checkPiece hFile pieceLength fileSize (pieceMap, fileContents) piece = do
+		checkPiece _ _ (pieceMap, []) _ = return (pieceMap, [])
+		checkPiece pieceLength fileSize (!pieceMap, fileContents) piece = do
 			let percentChecked = (fromIntegral $ (view pOffset piece)*pieceLength) / (fromIntegral fileSize)
 			when (percentChecked <= 1) $ putStrLn $ "Resuming: " ++ (show $ 100 * percentChecked) ++ "%"
 			{-hSeek hFile AbsoluteSeek ((view pOffset piece)*pieceLength)
@@ -332,6 +334,7 @@ handleMessage_ handle hFile (msg:xs) pieceMap
 		putStrLn "bitfield"
 		putStrLn $ show xs
 		putStrLn $ "length: " ++ (show $ length xs)
+		interestedMsg handle
 	| msg == request = do
 		putStrLn "request"
 		putStrLn xs
@@ -550,19 +553,19 @@ preExecTorrent fileName = do
 		where BString packed = torrent M.! "announce"
 	let info_hash = SHA1.hash $ BL.toStrict $ bPack $ bInfo
 	let info_url_hash = BE.unpack $ HU.urlEncode False info_hash
+	let Just (BString _resultFile) = M.lookup "name" info
+	let resultFile = BU.toString $ BL.toStrict _resultFile
+	putStrLn $ "Downloading file: " ++ resultFile
+	let Just _pieceMap = mkPieceMap torrent
+	putStrLn "Checking progress..."
+	resumedPieceMap <- withBinaryFile resultFile ReadWriteMode $ \hFile -> resumePieceMap _pieceMap hFile
+	putStrLn $ "Current progress: " ++ (show (100 * (fromIntegral $ bytesComplete resumedPieceMap) / (fromIntegral $ bytesTotal resumedPieceMap)))
 	(url, rsp) <- connectTracker tracker info_url_hash
 	body <- getResponseBody rsp
 	let Just (BDict trackerResp) = trackerResponse body
 	let Just (BString peers) = M.lookup "peers" trackerResp
 	let peersAddrInfo = map peerToAddrInfo $ splitPeers peers
-	let Just (BString _resultFile) = M.lookup "name" info
-	let resultFile = BU.toString $ BL.toStrict _resultFile
-	putStrLn $ "Downloading file: " ++ resultFile
 	hFile <- openBinaryFile resultFile ReadWriteMode
-	let Just _pieceMap = mkPieceMap torrent
-	putStrLn "Checking progress..."
-	resumedPieceMap <- resumePieceMap _pieceMap hFile
-	putStrLn $ "Current progress: " ++ (show (100 * (fromIntegral $ bytesComplete resumedPieceMap) / (fromIntegral $ bytesTotal resumedPieceMap)))
 	return (torrent, url, rsp, trackerResp, peersAddrInfo, info_hash, resultFile, resumedPieceMap, hFile)
 
 execTorrent (fileName:[]) = do
@@ -578,7 +581,7 @@ execTorrent (fileName:port:[]) = do
 	(handle, sock) <- connectPeer serveraddr $ BE.unpack info_hash
 	putStrLn "fork listen"
 	masterThread <- newEmptyMVar
-	forkIO $ listenWith handle hFile pieceMap masterThread
+	listenWith handle hFile pieceMap masterThread -- forkIO $ 
 	--putStrLn "bitfieldMsg"
 	--bitfieldMsg handle
 	putStrLn "interestedMsg"
@@ -587,7 +590,7 @@ execTorrent (fileName:port:[]) = do
 	--requestMsg handle
 	--return (handle, pieceMap, torrent, hFile)
 	-- TODO open server handle
-	takeMVar masterThread
+	--takeMVar masterThread
 
 execTorrent _ = do
 	putStrLn "./torrent-client file.torrent [local peer's port]"
