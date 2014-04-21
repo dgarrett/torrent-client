@@ -23,6 +23,7 @@ import           Network.HTTP
 import qualified Network.HTTP.Types.URI as HU
 import           Network.Socket
 import           Network.URL
+import           System.Environment
 import           System.IO
 
 type BlockSize = Int
@@ -76,24 +77,36 @@ piece = '\7'
 cancel = '\8'
 port = '\9'
 
+hGetCharSafe handle = do
+	eof <- hIsEOF handle
+	if eof then return '\0' else hGetChar handle
+
 resumePieceMap :: PieceMap -> Handle -> IO (PieceMap)
 resumePieceMap pieceMap hFile = do
 	let Just firstPiece = M.lookup 0 pieceMap
 	let pieceLength = view pLength firstPiece
-	F.foldlM (checkPiece hFile pieceLength) pieceMap pieceMap
+	fileSize <- hFileSize hFile
+	F.foldlM (checkPiece hFile pieceLength fileSize) pieceMap pieceMap
 	where
-		checkPiece hFile pieceLength pieceMap piece = do
+		checkPiece hFile pieceLength fileSize pieceMap piece = do
+			let percentChecked = (fromIntegral $ (view pOffset piece)*pieceLength) / (fromIntegral fileSize)
+			when (percentChecked <= 1) $ putStrLn $ "Resuming: " ++ (show percentChecked)
 			hSeek hFile AbsoluteSeek ((view pOffset piece)*pieceLength)
-			pieceContents <- mapM hGetChar $ replicate (fromIntegral $ view pLength piece) hFile
-			let hash = SHA1.hash $ BE.pack pieceContents
-			let correctHash = view pDigest piece
-			let matches = (BL.toStrict correctHash) == hash
+			eof <- hIsEOF hFile
+			if eof
+				then do
+					return $ M.update (\p -> Just $ set pState Main.Pending p) (view pOffset piece) pieceMap
+				else do
+					pieceContents <- mapM hGetCharSafe $ replicate (fromIntegral $ view pLength piece) hFile
+					let hash = SHA1.hash $ BE.pack pieceContents
+					let correctHash = view pDigest piece
+					let matches = (BL.toStrict correctHash) == hash
 
-			return $ if matches
-				then
-					M.update (\p -> Just $ set pState Main.Done p) (view pOffset piece) pieceMap
-				else
-					M.update (\p -> Just $ set pState Main.Pending p) (view pOffset piece) pieceMap
+					return $ if matches
+						then
+							M.update (\p -> Just $ set pState Main.Done p) (view pOffset piece) pieceMap
+						else
+							M.update (\p -> Just $ set pState Main.Pending p) (view pOffset piece) pieceMap
 
 mkPieceMap :: M.Map String BEncode -> Maybe PieceMap
 mkPieceMap metainfo = do
@@ -300,6 +313,7 @@ handleMessage_ handle hFile (msg:xs) pieceMap
 	| msg == unchoke = do
 		putStrLn "unchoke"
 		putStrLn xs
+		startDownload handle pieceMap 10
 	| msg == interested = do
 		putStrLn "interested"
 		putStrLn xs
@@ -354,6 +368,32 @@ handleMessage_ handle hFile (msg:xs) pieceMap
 				--return __pieceMap
 			else
 				return __pieceMap
+
+		-- Attempt at putting verification in another thread. Doesn't work
+		{-let ___pieceMap = __pieceMap
+		let Just thisPiece = M.lookup (from4Byte index) _pieceMap
+
+		let check index pieceLength pieceMap hFile thisPiece = do
+			hSeek hFile AbsoluteSeek ((from4Byte index)*pieceLength)
+			--let Just thisPiece = M.lookup (from4Byte index) _pieceMap
+			pieceContents <- mapM hGetChar $ replicate (pieceSize thisPiece) hFile
+			let hash = SHA1.hash $ BE.pack pieceContents
+			--putStrLn $ "=======hash: " ++ (BE.unpack $ HU.urlEncode False hash)
+			let correctHash = view pDigest thisPiece
+			let matches = (BL.toStrict correctHash) == hash
+			--putStrLn $ "========= correct: " ++ (show matches)
+
+			modifyMVar_ pieceMap $ \_pieceMap -> return $ if matches
+				then
+					M.update (\p -> Just $ set pState Main.Done p) (from4Byte index) _pieceMap
+				else
+					M.update (\p -> Just $ set pState Main.Pending p) (from4Byte index) _pieceMap
+			--return __pieceMap
+		if needToCheckHash
+			then forkIO $ check index pieceLength pieceMap hFile thisPiece
+			else
+				forkIO $ return ()
+		-}
 
 		putStrLn $ "Percent complete: " ++ (show (100 * (fromIntegral $ bytesComplete ___pieceMap) / (fromIntegral $ bytesTotal ___pieceMap)))
 		putStrLn $ "Percent complete (with unverified): " ++ (show (100 * ((fromIntegral $ bytesComplete ___pieceMap) + (fromIntegral $ bytesUnverified ___pieceMap)) / (fromIntegral $ bytesTotal ___pieceMap)))
@@ -415,10 +455,10 @@ handleMessage handle hFile pieceMap = do
 			loop lsock
 --}
 
-listenWith handle hFile pieceMap = do
+listenWith handle hFile pieceMap masterThread = do
 	cont <- handleMessage handle hFile pieceMap
 	if cont
-	then listenWith handle hFile pieceMap
+	then listenWith handle hFile pieceMap masterThread
 	else do
 		putStrLn "========================= listenWith done"
 		return ()
@@ -453,7 +493,8 @@ testAddressIndex i = do
 	(handle, sock) <- connectPeer (peers !! i) $ BE.unpack info_hash
 	hFile <- openBinaryFile "torrent" ReadWriteMode
 	putStrLn "fork listen"
-	forkIO $ listenWith handle hFile pieceMap
+	masterThread <- newEmptyMVar
+	forkIO $ listenWith handle hFile pieceMap masterThread
 	--putStrLn "bitfieldMsg"
 	--bitfieldMsg handle
 	putStrLn "interestedMsg"
@@ -474,7 +515,8 @@ testLocalhost port = do
 	putStrLn "connectPeer"
 	(handle, sock) <- connectPeer serveraddr $ BE.unpack info_hash
 	putStrLn "fork listen"
-	forkIO $ listenWith handle hFile pieceMap
+	masterThread <- newEmptyMVar
+	forkIO $ listenWith handle hFile pieceMap masterThread
 	--putStrLn "bitfieldMsg"
 	--bitfieldMsg handle
 	putStrLn "interestedMsg"
@@ -494,3 +536,57 @@ test = do
 	let Just (BString peers) = M.lookup "peers" trackerResp
 	let peersAddrInfo = map peerToAddrInfo $ splitPeers peers
 	return (torrent, url, rsp, trackerResp, peersAddrInfo)
+
+preExecTorrent fileName = do
+	torrent <- openTorrent fileName
+	let Just bInfo = M.lookup "info" torrent
+	let BDict info = bInfo
+	let tracker = BU.toString $ BL.toStrict packed
+		where BString packed = torrent M.! "announce"
+	let info_hash = SHA1.hash $ BL.toStrict $ bPack $ bInfo
+	let info_url_hash = BE.unpack $ HU.urlEncode False info_hash
+	(url, rsp) <- connectTracker tracker info_url_hash
+	body <- getResponseBody rsp
+	let Just (BDict trackerResp) = trackerResponse body
+	let Just (BString peers) = M.lookup "peers" trackerResp
+	let peersAddrInfo = map peerToAddrInfo $ splitPeers peers
+	let Just (BString _resultFile) = M.lookup "name" info
+	let resultFile = BU.toString $ BL.toStrict _resultFile
+	putStrLn $ "Downloading file: " ++ resultFile
+	hFile <- openBinaryFile resultFile ReadWriteMode
+	let Just _pieceMap = mkPieceMap torrent
+	putStrLn "Checking progress..."
+	resumedPieceMap <- resumePieceMap _pieceMap hFile
+	putStrLn $ "Current progress: " ++ (show (100 * (fromIntegral $ bytesComplete resumedPieceMap) / (fromIntegral $ bytesTotal resumedPieceMap)))
+	return (torrent, url, rsp, trackerResp, peersAddrInfo, info_hash, resultFile, resumedPieceMap, hFile)
+
+execTorrent (fileName:[]) = do
+	return ()
+
+-- Localhost
+execTorrent (fileName:port:[]) = do
+	(torrent, url, rsp, trackerResp, peers, info_hash, resultFile, _pieceMap, hFile) <- preExecTorrent fileName
+	pieceMap <- newMVar _pieceMap
+	addrinfos <- getAddrInfo Nothing (Just "localhost") (Just port)
+	let serveraddr = addrinfos !! 3
+	putStrLn "connectPeer"
+	(handle, sock) <- connectPeer serveraddr $ BE.unpack info_hash
+	putStrLn "fork listen"
+	masterThread <- newEmptyMVar
+	forkIO $ listenWith handle hFile pieceMap masterThread
+	--putStrLn "bitfieldMsg"
+	--bitfieldMsg handle
+	putStrLn "interestedMsg"
+	interestedMsg handle
+	--putStrLn "requestMsg"
+	--requestMsg handle
+	--return (handle, pieceMap, torrent, hFile)
+	-- TODO open server handle
+	takeMVar masterThread
+
+execTorrent _ = do
+	putStrLn "./torrent-client file.torrent [local peer's port]"
+
+main = do
+	args <- getArgs
+	execTorrent args
