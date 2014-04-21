@@ -308,6 +308,11 @@ notinterestedMsg handle = do
 	hFlush handle
 	putStrLn "interestedMsg waiting response"
 
+haveMsg handle index = do
+	hPutStr handle $ (to4Byte 5) ++ [toEnum 4] ++ (to4Byte index)
+	hFlush handle
+	putStrLn "haveMsg"
+
 --handleMessage_ :: Handle -> Handle -> String -> PieceMap -> IO ()
 handleMessage_ handle hFile [] pieceMap = do
 	putStrLn "keep alive"
@@ -368,11 +373,12 @@ handleMessage_ handle hFile (msg:xs) pieceMap
 				let matches = (BL.toStrict correctHash) == hash
 				--putStrLn $ "========= correct: " ++ (show matches)
 
-				return $ if matches
-					then
-						M.update (\p -> Just $ set pState Main.Done p) (from4Byte index) __pieceMap
+				if matches
+					then do
+						haveMsg handle (from4Byte index)
+						return $ M.update (\p -> Just $ set pState Main.Done p) (from4Byte index) __pieceMap
 					else
-						M.update (\p -> Just $ set pState Main.Pending p) (from4Byte index) __pieceMap
+						return $ M.update (\p -> Just $ set pState Main.Pending p) (from4Byte index) __pieceMap
 				--return __pieceMap
 			else
 				return __pieceMap
