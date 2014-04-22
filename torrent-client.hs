@@ -5,7 +5,7 @@
 
 import           Control.Applicative
 import           Control.Concurrent
-import           Control.Exception      (finally)
+import           Control.Exception      (finally, try, SomeException)
 import           Control.Lens
 import           Control.Monad
 import           Crypto.Hash.SHA1       as SHA1
@@ -269,20 +269,24 @@ peerToAddrInfo (addrBS, portBS) =
 		addr = toWord32 $ BL.reverse addrBS
 		port = toWord16 $ portBS
 
+connectPeer :: AddrInfo -> [Char] -> IO (Either SomeException (Handle, Socket))
 connectPeer serveraddr info_hash = do
-	sock <- socket (addrFamily serveraddr) Stream defaultProtocol -- (getProtocolNumber "tcp")
-	connect sock (addrAddress serveraddr)
-	handle <- socketToHandle sock ReadWriteMode
-	hSetBuffering handle LineBuffering
-	--hPutStr handle $"BAL mySavings" ++ [toEnum 0]
-	hPutStr handle $ [toEnum 19] ++ "BitTorrent protocol" ++ (replicate 8 $ toEnum 0) ++ info_hash ++ "Dylan" ++ (replicate 15 $ toEnum 0)
-	--hPutStr handle $ "BitTorrent protocol" ++ info_hash ++ info_hash
-	hFlush handle
-	--line <- hGetLine handle
-	line <- mapM hGetChar (replicate 68 $ handle)
-	putStrLn "handshake"
-	putStrLn $ show line
-	return (handle, sock)
+	--Right (handle, sock) <- f
+	f
+	where f = try $ do
+		sock <- socket (addrFamily serveraddr) Stream defaultProtocol -- (getProtocolNumber "tcp")
+		connect sock (addrAddress serveraddr)
+		handle <- socketToHandle sock ReadWriteMode
+		hSetBuffering handle LineBuffering
+		--hPutStr handle $"BAL mySavings" ++ [toEnum 0]
+		hPutStr handle $ [toEnum 19] ++ "BitTorrent protocol" ++ (replicate 8 $ toEnum 0) ++ info_hash ++ "Dylan" ++ (replicate 15 $ toEnum 0)
+		--hPutStr handle $ "BitTorrent protocol" ++ info_hash ++ info_hash
+		hFlush handle
+		--line <- hGetLine handle
+		line <- mapM hGetChar (replicate 68 $ handle)
+		putStrLn "handshake"
+		putStrLn $ show line
+		return (handle, sock)
 
 bitfieldMsg handle bitfield = do
 	--let length = 221
@@ -467,7 +471,7 @@ handleMessage handle hFile pieceMap = do
 			--return (size, msg)
 		_ -> do
 			hFlush hFile
-			hClose hFile
+			--hClose hFile
 			putStrLn "=====================================EOF"
 			return False
 
@@ -492,9 +496,13 @@ handleMessage handle hFile pieceMap = do
 --}
 
 listenWith handle hFile pieceMap masterThread = do
+	takeMVar masterThread
+	listenWith_ handle hFile pieceMap masterThread
+
+listenWith_ handle hFile pieceMap masterThread = do
 	cont <- handleMessage handle hFile pieceMap
 	if cont
-	then listenWith handle hFile pieceMap masterThread
+	then listenWith_ handle hFile pieceMap masterThread
 	else do
 		putStrLn "========================= listenWith done"
 		return ()
@@ -526,7 +534,7 @@ testAddressIndex i = do
 	--addrinfos <- getAddrInfo Nothing (Just "localhost") (Just port)
 	--let serveraddr = addrinfos !! 3
 	putStrLn $ "connectPeer: " ++ (show (peers !! i))
-	(handle, sock) <- connectPeer (peers !! i) $ BE.unpack info_hash
+	Right (handle, sock) <- connectPeer (peers !! i) $ BE.unpack info_hash
 	hFile <- openBinaryFile "torrent" ReadWriteMode
 	putStrLn "fork listen"
 	masterThread <- newEmptyMVar
@@ -549,7 +557,7 @@ testLocalhost port = do
 	addrinfos <- getAddrInfo Nothing (Just "localhost") (Just port)
 	let serveraddr = addrinfos !! 3
 	putStrLn "connectPeer"
-	(handle, sock) <- connectPeer serveraddr $ BE.unpack info_hash
+	Right (handle, sock) <- connectPeer serveraddr $ BE.unpack info_hash
 	putStrLn "fork listen"
 	masterThread <- newEmptyMVar
 	forkIO $ listenWith handle hFile pieceMap masterThread
@@ -596,23 +604,38 @@ preExecTorrent fileName = do
 	hFile <- openBinaryFile resultFile ReadWriteMode
 	return (torrent, url, rsp, trackerResp, peersAddrInfo, info_hash, resultFile, resumedPieceMap, hFile)
 
+parallelExec peers pieceMap info_hash hFile = do
+	pauses <- mapM f peers
+	forever $ sequence pauses
+	where
+		f peer = do
+			res <- connectPeer peer $ BE.unpack info_hash
+			case res of
+				Right (handle, sock) -> do
+					putStrLn $ "connectPeer: " ++ (show peer)
+					thread <- newMVar "test"
+					forkIO $ listenWith handle hFile pieceMap thread
+					return $ putMVar thread "test"
+				Left e -> return (return ())
+
 execTorrent (fileName:[]) = do
 	(torrent, url, rsp, trackerResp, peers, info_hash, resultFile, _pieceMap, hFile) <- preExecTorrent fileName
 	pieceMap <- newMVar _pieceMap
 	let i = 0
 	let info_hash = SHA1.hash $ BL.toStrict $ bPack $ torrent M.! "info"
-	--addrinfos <- getAddrInfo Nothing (Just "localhost") (Just port)
-	--let serveraddr = addrinfos !! 3
+	parallelExec (take 1000 peers) pieceMap info_hash hFile
+	--
 	putStrLn $ "connectPeer: " ++ (show (peers !! i))
-	(handle, sock) <- connectPeer (peers !! i) $ BE.unpack info_hash
-	--hFile <- openBinaryFile "torrent" ReadWriteMode
+	Right (handle, sock) <- connectPeer (peers !! i) $ BE.unpack info_hash
 	putStrLn "fork listen"
-	masterThread <- newEmptyMVar
-	listenWith handle hFile pieceMap masterThread
+	thread1 <- newMVar "test"
+	
+	listenWith handle hFile pieceMap thread1
+	return ()
 	--putStrLn "bitfieldMsg"
 	--bitfieldMsg handle
-	putStrLn "interestedMsg"
-	interestedMsg handle
+	--putStrLn "interestedMsg"
+	--interestedMsg handle
 
 -- Localhost
 execTorrent (fileName:port:[]) = do
@@ -621,9 +644,9 @@ execTorrent (fileName:port:[]) = do
 	addrinfos <- getAddrInfo Nothing (Just "localhost") (Just port)
 	let serveraddr = addrinfos !! 3
 	putStrLn "connectPeer"
-	(handle, sock) <- connectPeer serveraddr $ BE.unpack info_hash
+	Right (handle, sock) <- connectPeer serveraddr $ BE.unpack info_hash
 	putStrLn "fork listen"
-	masterThread <- newEmptyMVar
+	masterThread <- newMVar "test"
 	listenWith handle hFile pieceMap masterThread -- forkIO $ 
 	--putStrLn "bitfieldMsg"
 	--bitfieldMsg handle
