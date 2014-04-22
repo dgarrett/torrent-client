@@ -597,7 +597,22 @@ preExecTorrent fileName = do
 	return (torrent, url, rsp, trackerResp, peersAddrInfo, info_hash, resultFile, resumedPieceMap, hFile)
 
 execTorrent (fileName:[]) = do
-	return ()
+	(torrent, url, rsp, trackerResp, peers, info_hash, resultFile, _pieceMap, hFile) <- preExecTorrent fileName
+	pieceMap <- newMVar _pieceMap
+	let i = 0
+	let info_hash = SHA1.hash $ BL.toStrict $ bPack $ torrent M.! "info"
+	--addrinfos <- getAddrInfo Nothing (Just "localhost") (Just port)
+	--let serveraddr = addrinfos !! 3
+	putStrLn $ "connectPeer: " ++ (show (peers !! i))
+	(handle, sock) <- connectPeer (peers !! i) $ BE.unpack info_hash
+	--hFile <- openBinaryFile "torrent" ReadWriteMode
+	putStrLn "fork listen"
+	masterThread <- newEmptyMVar
+	listenWith handle hFile pieceMap masterThread
+	--putStrLn "bitfieldMsg"
+	--bitfieldMsg handle
+	putStrLn "interestedMsg"
+	interestedMsg handle
 
 -- Localhost
 execTorrent (fileName:port:[]) = do
