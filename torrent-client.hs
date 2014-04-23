@@ -146,12 +146,39 @@ mkPieceMap metainfo = do
 			f (pieceLength, remainingFileLength, index, map) hash = (nextPieceLength, remainingFileLength - pieceLength, index + 1, M.insert index (PieceInfo index pieceLength hash Pending) map)
 				where nextPieceLength = if pieceLength < (remainingFileLength - pieceLength) then pieceLength else (remainingFileLength - pieceLength)
 
-putPieceMap pieceMap pieceIndex offset block = do
-	let updated = M.update replacePiece pieceIndex pieceMap
-	return updated
+{-
+putPieceMap pieceMap pieceIndex offset block =
+	M.update replacePiece pieceIndex pieceMap
+	--return updated
 	where replacePiece piece = do
 		let piece' = over (pState . requestedBlocks) (S.delete (Block offset $ length block)) piece
 		Just $ over (pState . haveBlocks) (S.insert (Block (offset*defaultBlockSize) $ length block)) piece'
+-}
+
+getUnrequestedOrRequestedBlock :: PieceMap -> Maybe (Block, PieceNum, PieceMap)
+getUnrequestedOrRequestedBlock pieceMap = do
+	case getUnrequestedBlock pieceMap of
+		Just a -> return a
+		Nothing -> trace "End Game: getRequestedBlock" $ getRequestedBlock pieceMap
+
+getRequestedBlock :: PieceMap -> Maybe (Block, PieceNum, PieceMap)
+getRequestedBlock pieceMap = do
+	(block, key) <- findBlock pieceMap (M.keys pieceMap)
+	--let newMap = M.update (\_ -> Just $ over (pState . requestedBlocks) (S.insert block) newPiece) key pieceMap
+	return (block, key, pieceMap)
+	where
+		findBlock _ [] = Nothing
+		findBlock pieceMap (k:keys) = case do
+			piece <- M.lookup k pieceMap
+			let pieceSize = view pLength piece
+			--let newPiece = over pState (\ps -> if ps == Pending then InProgress (ceiling $ (fromIntegral pieceSize) / (fromIntegral defaultBlockSize)) (S.fromList []) (mkBlockSet pieceSize defaultBlockSize) (S.fromList []) else ps) piece
+			let req = view (pState . requestedBlocks) piece
+			(block, newUnrequested) <- S.minView req
+			--let newNewPiece = over (pState . unrequestedBlocks) (\_ -> newUnrequested) newPiece
+			return (block, k)--, newNewPiece)
+			of
+				Nothing -> findBlock pieceMap keys
+				x -> x
 
 getUnrequestedBlock :: PieceMap -> Maybe (Block, PieceNum, PieceMap)
 getUnrequestedBlock pieceMap = do
@@ -344,118 +371,112 @@ handleMessage_ handle hFile [] pieceMap = do
 
 handleMessage_ handle hFile (msg:xs) pieceMap
 	| msg == choke = do
-		putStrLn "choke"
+		putStr "received: choke - "
 		putStrLn xs
 	| msg == unchoke = do
-		putStrLn "unchoke"
+		putStr "received: unchoke - "
 		putStrLn xs
 		startDownload handle pieceMap 10
 	| msg == interested = do
-		putStrLn "interested"
+		putStr "received: interested - "
 		putStrLn xs
 	| msg == notInterested = do
-		putStrLn "not interested"
+		putStr "received: not interested - "
 		putStrLn xs
 	| msg == have = do
-		putStrLn "have"
+		putStr "received: have - "
 		putStrLn $ show xs
 	| msg == bitfield = do
-		putStrLn "bitfield"
+		putStr "received: bitfield "
 		putStrLn $ show xs
-		putStrLn $ "length: " ++ (show $ length xs)
 		_bitfield <- withMVar pieceMap $ (return . mkBitfield)
 		bitfieldMsg handle _bitfield
 		interestedMsg handle
 	| msg == request = do
-		putStrLn "request"
+		putStr "received: request - "
 		putStrLn xs
 	| msg == piece = modifyMVar_ pieceMap $ \_pieceMap -> do
-		putStrLn "piece"
+		putStrLn "received: piece------------------------------------"
 		let (index, rest) = splitAt 4 xs
 		let (begin, block) = splitAt 4 rest
-		putStrLn $ "index: " ++ show (from4Byte index)
-		putStrLn $ "begin: " ++ show (from4Byte begin)
-		putStrLn $ "length: " ++ show (length block)
-		let Just firstPiece = M.lookup 0 _pieceMap --M.lookup (from4Byte index) _pieceMap
-		let pieceLength = view pLength firstPiece
-		--putStrLn $ show block
-		hSeek hFile AbsoluteSeek ((from4Byte index)*pieceLength + from4Byte begin)
-		putStrLn $ "Seek to: " ++ (show ((from4Byte index)*pieceLength + from4Byte begin))
-		hPutStr hFile block
-		hFlush hFile
-		--let Just updated = putPieceMap _pieceMap (from4Byte index) (from4Byte begin) block
-
-		-- Check piece if necessary
-		let (__pieceMap, needToCheckHash) = receiveBlock _pieceMap (from4Byte index) (Block (from4Byte begin) (length block))
-		putStrLn $ "needToCheckHash: " ++ (show needToCheckHash)
-		___pieceMap <- if needToCheckHash
+		putStr $ "index: " ++ show (from4Byte index)
+		putStr $ " begin: " ++ show (from4Byte begin)
+		putStrLn $ " length: " ++ show (length block)
+		let Just piece = M.lookup (from4Byte index) _pieceMap
+		result <- if ((view pState piece == Main.Done)) || (S.member (Block (from4Byte begin) (length block)) (view (pState . haveBlocks) piece))
 			then do
-				hSeek hFile AbsoluteSeek ((from4Byte index)*pieceLength)
-				let Just thisPiece = M.lookup (from4Byte index) _pieceMap
-				pieceContents <- mapM hGetChar $ replicate (pieceSize thisPiece) hFile
-				let hash = SHA1.hash $ BE.pack pieceContents
-				--putStrLn $ "=======hash: " ++ (BE.unpack $ HU.urlEncode False hash)
-				let correctHash = view pDigest thisPiece
-				let matches = (BL.toStrict correctHash) == hash
-				--putStrLn $ "========= correct: " ++ (show matches)
-
-				if matches
-					then do
-						haveMsg handle (from4Byte index)
-						return $ M.update (\p -> Just $ set pState Main.Done p) (from4Byte index) __pieceMap
-					else
-						return $ M.update (\p -> Just $ set pState Main.Pending p) (from4Byte index) __pieceMap
-				--return __pieceMap
-			else
-				return __pieceMap
-
-		-- Attempt at putting verification in another thread. Doesn't work
-		{-let ___pieceMap = __pieceMap
-		let Just thisPiece = M.lookup (from4Byte index) _pieceMap
-
-		let check index pieceLength pieceMap hFile thisPiece = do
-			hSeek hFile AbsoluteSeek ((from4Byte index)*pieceLength)
-			--let Just thisPiece = M.lookup (from4Byte index) _pieceMap
-			pieceContents <- mapM hGetChar $ replicate (pieceSize thisPiece) hFile
-			let hash = SHA1.hash $ BE.pack pieceContents
-			--putStrLn $ "=======hash: " ++ (BE.unpack $ HU.urlEncode False hash)
-			let correctHash = view pDigest thisPiece
-			let matches = (BL.toStrict correctHash) == hash
-			--putStrLn $ "========= correct: " ++ (show matches)
-
-			modifyMVar_ pieceMap $ \_pieceMap -> return $ if matches
-				then
-					M.update (\p -> Just $ set pState Main.Done p) (from4Byte index) _pieceMap
-				else
-					M.update (\p -> Just $ set pState Main.Pending p) (from4Byte index) _pieceMap
-			--return __pieceMap
-		if needToCheckHash
-			then forkIO $ check index pieceLength pieceMap hFile thisPiece
-			else
-				forkIO $ return ()
-		-}
-
-		putStrLn $ "Percent complete: " ++ (show (100 * (fromIntegral $ bytesComplete ___pieceMap) / (fromIntegral $ bytesTotal ___pieceMap))) ++ "%"
-		putStrLn $ "Percent complete (with unverified): " ++ (show (100 * ((fromIntegral $ bytesComplete ___pieceMap) + (fromIntegral $ bytesUnverified ___pieceMap)) / (fromIntegral $ bytesTotal ___pieceMap))) ++ "%"
-
-		let unreqBlock = getUnrequestedBlock ___pieceMap
-		--let Just (newBlock, newPieceNum, newPieceMap) = getUnrequestedBlock _pieceMap
-		newPieceMap <- case unreqBlock of
-			Just (newBlock, newPieceNum, newPieceMap) -> do
-				let newOffset = view bOffset newBlock
-				let newLength = view bSize newBlock
-				trace ("pn: " ++ (show newPieceNum) ++ " off: " ++ (show newOffset)) (return ())
-				requestMsg handle (fromIntegral newPieceNum) newOffset newLength
+				putStrLn "Stale block being received"
+				let unreqBlock = getUnrequestedOrRequestedBlock _pieceMap
+				--let Just (newBlock, newPieceNum, newPieceMap) = getUnrequestedBlock _pieceMap
+				newPieceMap <- case unreqBlock of
+					Just (newBlock, newPieceNum, newPieceMap) -> do
+						let newOffset = view bOffset newBlock
+						let newLength = view bSize newBlock
+						trace ("Now requesting - pn: " ++ (show newPieceNum) ++ " off: " ++ (show newOffset)) (return ())
+						requestMsg handle (fromIntegral newPieceNum) newOffset newLength
+						return newPieceMap
+					_ -> do
+						putStrLn "No more pieces to request"
+						return _pieceMap
 				return newPieceMap
-			_ -> return ___pieceMap
-		return newPieceMap
-		-- >> do
-		--return ()
+			else do
+				let Just firstPiece = M.lookup 0 _pieceMap --M.lookup (from4Byte index) _pieceMap
+				let pieceLength = view pLength firstPiece
+				--putStrLn $ show block
+				hSeek hFile AbsoluteSeek ((from4Byte index)*pieceLength + from4Byte begin)
+				--putStrLn $ "Seek to: " ++ (show ((from4Byte index)*pieceLength + from4Byte begin))
+				hPutStr hFile block
+				hFlush hFile
+				--let Just updated = putPieceMap _pieceMap (from4Byte index) (from4Byte begin) block
+
+				-- Check piece if necessary
+				let (__pieceMap, needToCheckHash) = receiveBlock _pieceMap (from4Byte index) (Block (from4Byte begin) (length block))
+				putStrLn $ "needToCheckHash: " ++ (show needToCheckHash)
+				___pieceMap <- if needToCheckHash
+					then do
+						hSeek hFile AbsoluteSeek ((from4Byte index)*pieceLength)
+						let Just thisPiece = M.lookup (from4Byte index) __pieceMap
+						pieceContents <- mapM hGetChar $ replicate (pieceSize thisPiece) hFile
+						let hash = SHA1.hash $ BE.pack pieceContents
+						--putStrLn $ "=======hash: " ++ (BE.unpack $ HU.urlEncode False hash)
+						let correctHash = view pDigest thisPiece
+						let matches = (BL.toStrict correctHash) == hash
+						--putStrLn $ "========= correct: " ++ (show matches)
+
+						if matches
+							then do
+								haveMsg handle (from4Byte index)
+								return $ M.update (\p -> Just $ set pState Main.Done p) (from4Byte index) __pieceMap
+							else
+								return $ M.update (\p -> Just $ set pState Main.Pending p) (from4Byte index) __pieceMap
+						--return __pieceMap
+					else
+						return __pieceMap
+
+				--putStrLn $ "Percent complete: " ++ (show (100 * (fromIntegral $ bytesComplete ___pieceMap) / (fromIntegral $ bytesTotal ___pieceMap))) ++ "%"
+				--putStrLn $ "Percent complete (with unverified): " ++ (show (100 * ((fromIntegral $ bytesComplete ___pieceMap) + (fromIntegral $ bytesUnverified ___pieceMap)) / (fromIntegral $ bytesTotal ___pieceMap))) ++ "%"
+
+				let unreqBlock = getUnrequestedOrRequestedBlock ___pieceMap
+				--let Just (newBlock, newPieceNum, newPieceMap) = getUnrequestedBlock _pieceMap
+				newPieceMap <- case unreqBlock of
+					Just (newBlock, newPieceNum, newPieceMap) -> do
+						let newOffset = view bOffset newBlock
+						let newLength = view bSize newBlock
+						trace ("Now requesting - pn: " ++ (show newPieceNum) ++ " off: " ++ (show newOffset)) (return ())
+						requestMsg handle (fromIntegral newPieceNum) newOffset newLength
+						return newPieceMap
+					_ -> return ___pieceMap
+				return newPieceMap
+				-- >> do
+				--return ()
+		putStrLn $ "Percent complete (and verified): " ++ (show (100 * (fromIntegral $ bytesComplete result) / (fromIntegral $ bytesTotal result))) ++ "%"
+		putStrLn $ "Percent complete (including unverified blocks): " ++ (show (100 * ((fromIntegral $ bytesComplete result) + (fromIntegral $ bytesUnverified result)) / (fromIntegral $ bytesTotal result))) ++ "%"
+		return result
 	| msg == cancel = do
-		putStrLn "cancel"
+		putStr "received: cancel - "
 		putStrLn xs
 	| otherwise = do
-		putStrLn $ "message type: " ++ show msg
+		putStrLn $ "received: unknown message type: " ++ show msg
 		putStrLn xs
 
 handleMessage handle hFile pieceMap = do
@@ -472,7 +493,7 @@ handleMessage handle hFile pieceMap = do
 		_ -> do
 			hFlush hFile
 			--hClose hFile
-			putStrLn "=====================================EOF"
+			--putStrLn "=====================================EOF"
 			return False
 
 {--listenAt port_ = do
@@ -504,16 +525,16 @@ listenWith_ handle hFile pieceMap masterThread = do
 	if cont
 	then listenWith_ handle hFile pieceMap masterThread
 	else do
-		putStrLn "========================= listenWith done"
+		putStrLn "========================= listenWith done - Peer disconnected"
 		return ()
 
 startDownload :: Handle -> MVar PieceMap -> Int -> IO ()
 startDownload handle pieceMap parallelRequests = modifyMVar_ pieceMap $ \_pieceMap -> do
-	foldl f (return _pieceMap) [1..parallelRequests]
+	foldM f (_pieceMap) [1..parallelRequests]
 	where
-		f pieceMap _ = do
-			_pieceMap <- pieceMap
-			let unreqBlock = getUnrequestedBlock _pieceMap
+		f _pieceMap _ = do
+			--_pieceMap <- pieceMap
+			let unreqBlock = getUnrequestedOrRequestedBlock _pieceMap
 			newPieceMap <- case unreqBlock of
 				Just (newBlock, newPieceNum, newPieceMap) -> do
 					let newOffset = view bOffset newBlock
@@ -604,26 +625,44 @@ preExecTorrent fileName = do
 	hFile <- openBinaryFile resultFile ReadWriteMode
 	return (torrent, url, rsp, trackerResp, peersAddrInfo, info_hash, resultFile, resumedPieceMap, hFile)
 
+myForkIO io = do
+	mvar <- newEmptyMVar
+	forkFinally io (\_ -> putMVar mvar ())
+	return mvar
+
 parallelExec peers pieceMap info_hash hFile = do
-	pauses <- mapM f peers
-	forever $ sequence pauses
+	pauses <- mapM myF peers
+	mapM (takeMVar) pauses
+	--forever $ sequence pauses
 	where
+		myF peer = do
+			myForkIO $ do
+				thread <- newMVar "test"
+				res <- connectPeer peer $ BE.unpack info_hash
+				case res of
+					Right (handle, sock) -> do
+						putStrLn $ "connectPeer: " ++ (show peer)
+						listenWith handle hFile pieceMap thread
+						return ()
+					Left e -> return ()
 		f peer = do
-			res <- connectPeer peer $ BE.unpack info_hash
-			case res of
-				Right (handle, sock) -> do
-					putStrLn $ "connectPeer: " ++ (show peer)
-					thread <- newMVar "test"
-					forkIO $ listenWith handle hFile pieceMap thread
-					return $ putMVar thread "test"
-				Left e -> return (return ())
+			thread <- newMVar "test"
+			forkIO $ do
+				res <- connectPeer peer $ BE.unpack info_hash
+				case res of
+					Right (handle, sock) -> do
+						putStrLn $ "connectPeer: " ++ (show peer)
+						forkIO $ listenWith handle hFile pieceMap thread
+						return ()
+					Left e -> return ()
+			return $ putMVar thread "test"
 
 execTorrent (fileName:[]) = do
 	(torrent, url, rsp, trackerResp, peers, info_hash, resultFile, _pieceMap, hFile) <- preExecTorrent fileName
 	pieceMap <- newMVar _pieceMap
 	let i = 0
 	let info_hash = SHA1.hash $ BL.toStrict $ bPack $ torrent M.! "info"
-	parallelExec (take 1000 peers) pieceMap info_hash hFile
+	parallelExec (take 50 peers) pieceMap info_hash hFile
 	--
 	putStrLn $ "connectPeer: " ++ (show (peers !! i))
 	Right (handle, sock) <- connectPeer (peers !! i) $ BE.unpack info_hash
