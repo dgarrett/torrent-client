@@ -622,10 +622,11 @@ execTorrent (fileName:port:[]) = do
 	putStrLn "fork listen"
 	masterThread <- newMVar "test"
 	listenWith handle hFile pieceMap masterThread -- forkIO $ 
+	putStrLn "All peers disconnected"
 	--putStrLn "bitfieldMsg"
 	--bitfieldMsg handle
-	putStrLn "interestedMsg"
-	interestedMsg handle
+	--putStrLn "interestedMsg"
+	--interestedMsg handle
 	--putStrLn "requestMsg"
 	--requestMsg handle
 	--return (handle, pieceMap, torrent, hFile)
