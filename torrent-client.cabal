@@ -7,9 +7,9 @@ version:             0.1.0.0
 -- description:         
 -- license:             
 license-file:        LICENSE
--- author:              
+author:              Dylan Garrett
 -- maintainer:          
--- copyright:           
+copyright:           Dylan Garrett
 -- category:            
 build-type:          Simple
 cabal-version:       >=1.8
@@ -18,4 +18,4 @@ executable torrent-client
   main-is:             torrent-client.hs
   -- other-modules:       
   build-depends:       base ==4.6.*, network ==2.4.*, url, http-types, HTTP, containers, utf8-string, bytestring, bencode, cryptohash, lens
-  ghc-options:         -fforce-recomp -O2 -prof -osuf p_o -hisuf p_hi
+  --ghc-options:         -fforce-recomp -O2 -prof -osuf p_o -hisuf p_hi
