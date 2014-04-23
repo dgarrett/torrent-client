@@ -60,13 +60,6 @@ makeLenses ''PieceState
 
 defaultBlockSize = 2^14
 
---type PieceDoneMap = M.Map PieceNum Bool
-
-{--data Torrent = Torrent
-	{ pieces :: M.Map PieceNum piece
-	}
-	--}
-
 -- Message types
 choke = '\0'
 unchoke = '\1'
@@ -96,13 +89,6 @@ resumePieceMap pieceMap hFile = do
 		checkPiece pieceLength fileSize (!pieceMap, fileContents) piece = do
 			let percentChecked = (fromIntegral $ (view pOffset piece)*pieceLength) / (fromIntegral fileSize)
 			when (percentChecked <= 1) $ putStrLn $ "Resuming: " ++ (show $ 100 * percentChecked) ++ "%"
-			{-hSeek hFile AbsoluteSeek ((view pOffset piece)*pieceLength)
-			eof <- hIsEOF hFile
-			if eof
-				then do
-					return ((M.update (\p -> Just $ set pState Main.Pending p) (view pOffset piece) pieceMap), fileContents)
-				else do-}
-			--pieceContents <- mapM hGetCharSafe $ replicate (fromIntegral $ view pLength piece) hFile
 			let (pieceContents, remainingContents) = splitAt (fromIntegral $ view pLength piece) fileContents
 			let hash = SHA1.hash $ BE.pack pieceContents
 			let correctHash = view pDigest piece
@@ -145,15 +131,6 @@ mkPieceMap metainfo = do
 		where
 			f (pieceLength, remainingFileLength, index, map) hash = (nextPieceLength, remainingFileLength - pieceLength, index + 1, M.insert index (PieceInfo index pieceLength hash Pending) map)
 				where nextPieceLength = if pieceLength < (remainingFileLength - pieceLength) then pieceLength else (remainingFileLength - pieceLength)
-
-{-
-putPieceMap pieceMap pieceIndex offset block =
-	M.update replacePiece pieceIndex pieceMap
-	--return updated
-	where replacePiece piece = do
-		let piece' = over (pState . requestedBlocks) (S.delete (Block offset $ length block)) piece
-		Just $ over (pState . haveBlocks) (S.insert (Block (offset*defaultBlockSize) $ length block)) piece'
--}
 
 getUnrequestedOrRequestedBlock :: PieceMap -> Maybe (Block, PieceNum, PieceMap)
 getUnrequestedOrRequestedBlock pieceMap = do
@@ -198,11 +175,6 @@ getUnrequestedBlock pieceMap = do
 			of
 				Nothing -> findBlock pieceMap keys
 				x -> x
-			{--if not $ S.null (view (pState . unrequestedBlocks) piece) then (blockToRequest piece, k) else findBlock pieceMap keys
-		(block, )
-			where
-				Just piece = M.lookup k pieceMap
-				blockToRequest piece = S.minView $ view (pState. unrequestedBlocks) piece--}
 
 receiveBlock :: PieceMap -> PieceNum -> Block -> (PieceMap, Bool)
 receiveBlock pieceMap pieceNum block = (updatedPieceMap, needToCheckHash)
@@ -226,12 +198,6 @@ bytesUnverified pieceMap = M.foldl f 0 pieceMap
 		isInProgress _ = False
 		sumBlocksSize blocks = S.foldl (\x b -> x + (view bSize b)) 0 blocks
 
-{-
-needToCheckHash pieceMap pieceNum = (S.null $ view (pState . requestedBlocks) updatingBlock) && (S.null $ view (pState . unrequestedBlocks) updatingBlock)
-	where
-		Just updatingBlock = M.lookup pieceNum pieceMap
--}
-
 pieceSize piece = (S.foldl sum 0 $ view (pState . haveBlocks) piece) + (S.foldl sum 0 $ view (pState . unrequestedBlocks) piece) + (S.foldl sum 0 $ view (pState . requestedBlocks) piece)
 	where
 		sum s b = s + (view bSize b)
@@ -242,7 +208,6 @@ mkBlockSet pieceSize blockSize = _mkBlockSet pieceSize blockSize 0
 		_mkBlockSet pieceSize blockSize offset
 			| pieceSize > 0 = S.union (S.fromList [Block (offset*defaultBlockSize) (if blockSize < (fromIntegral pieceSize) then blockSize else (fromIntegral pieceSize))]) (_mkBlockSet (pieceSize - fromIntegral(blockSize)) blockSize (offset + 1))
 			| otherwise = S.fromList []
---S.fromList $ map (\offset -> Block offset blockSize) [0..(totalBlocks - 1)]
 
 openTorrent filename = do
 	fileContents <- BL.readFile filename
@@ -328,11 +293,6 @@ requestMsg handle piece offset length = do
 	hPutStr handle $ (to4Byte 13) ++ [toEnum 6] ++ (to4Byte piece) ++ (to4Byte offset) ++ (to4Byte length) -- 2^14
 	hFlush handle
 	putStrLn "sending: requestMsg"
-	--line <- hGetLine handle
-	--line <- mapM hGetChar (take 6 $ repeat handle)
-	--(size, msg) <- handleMessage handle
-	--mapM handleMessage (take 40 $ repeat handle)
-	--return msg
 
 keepAliveMsg handle = do
 	hPutStr handle (to4Byte 0)
@@ -496,25 +456,6 @@ handleMessage handle hFile pieceMap = do
 			--putStrLn "=====================================EOF"
 			return False
 
-{--listenAt port_ = do
-	let port = toEnum port_
-	lsock <- socket AF_INET Stream 0
-	bindSocket lsock $ SockAddrInet port iNADDR_ANY
---	listenWith lsock
---
---listenWith lsock = do
-	listen lsock sOMAXCONN
-	loop lsock `finally` sClose lsock
-	where
-		loop lsock = do
-			(sock,SockAddrInet _ _) <- accept lsock
-			handle <- socketToHandle sock ReadWriteMode
-			--f handle
-			handleMessage handle
-			--line <- hGetLine handle
-			--putStrLn $ show $ BE.pack line
-			loop lsock
---}
 
 listenWith handle hFile pieceMap masterThread = do
 	takeMVar masterThread
