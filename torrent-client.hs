@@ -635,6 +635,7 @@ execTorrent (fileName:port:[]) = do
 
 execTorrent _ = do
 	putStrLn "./torrent-client file.torrent [local peer's port]"
+	putStrLn "(Providing [local peer's port] will cause the client to only connect to a local peer)"
 
 main = do
 	args <- getArgs
