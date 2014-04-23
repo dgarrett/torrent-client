@@ -311,7 +311,7 @@ connectPeer serveraddr info_hash = do
 		hFlush handle
 		--line <- hGetLine handle
 		line <- mapM hGetChar (replicate 68 $ handle)
-		putStrLn "handshake"
+		putStr "handshake: "
 		putStrLn $ show line
 		return (handle, sock)
 
@@ -320,14 +320,14 @@ bitfieldMsg handle bitfield = do
 	--hPutStr handle $ (to4Byte (1 + length)) ++ [toEnum 5] ++ (replicate length '\x0')
 	let msgLength = length bitfield
 	hPutStr handle $ (to4Byte (1 + msgLength)) ++ [toEnum 5] ++ bitfield
+	putStr "sending: bitfieldMsg - "
 	putStrLn $ show bitfield
 	hFlush handle
-	putStrLn "bitfieldMsg"
 
 requestMsg handle piece offset length = do
 	hPutStr handle $ (to4Byte 13) ++ [toEnum 6] ++ (to4Byte piece) ++ (to4Byte offset) ++ (to4Byte length) -- 2^14
 	hFlush handle
-	putStrLn "requestMsg waiting response"
+	putStrLn "sending: requestMsg"
 	--line <- hGetLine handle
 	--line <- mapM hGetChar (take 6 $ repeat handle)
 	--(size, msg) <- handleMessage handle
@@ -337,36 +337,36 @@ requestMsg handle piece offset length = do
 keepAliveMsg handle = do
 	hPutStr handle (to4Byte 0)
 	hFlush handle
-	putStrLn "send: keep-alive"
+	putStrLn "sending: keep-alive"
 
 chokeMsg handle = do
 	hPutStr handle $ (to4Byte 1) ++ [toEnum 0]
 	hFlush handle
-	putStrLn "interestedMsg waiting response"
+	putStrLn "sending: chokeMsg"
 
 unchokeMsg handle = do
 	hPutStr handle $ (to4Byte 1) ++ [toEnum 1]
 	hFlush handle
-	putStrLn "interestedMsg waiting response"
+	putStrLn "sending: unchokeMsg"
 
 interestedMsg handle = do
 	hPutStr handle $ (to4Byte 1) ++ [toEnum 2]
 	hFlush handle
-	putStrLn "interestedMsg waiting response"
+	putStrLn "sending: interestedMsg"
 
 notinterestedMsg handle = do
 	hPutStr handle $ (to4Byte 1) ++ [toEnum 3]
 	hFlush handle
-	putStrLn "interestedMsg waiting response"
+	putStrLn "sending: notinterestedMsg"
 
 haveMsg handle index = do
 	hPutStr handle $ (to4Byte 5) ++ [toEnum 4] ++ (to4Byte index)
 	hFlush handle
-	putStrLn "haveMsg"
+	putStrLn "sending: haveMsg"
 
 --handleMessage_ :: Handle -> Handle -> String -> PieceMap -> IO ()
 handleMessage_ handle hFile [] pieceMap = do
-	putStrLn "keep alive"
+	putStrLn "received: keep-alive"
 	keepAliveMsg handle
 
 handleMessage_ handle hFile (msg:xs) pieceMap
@@ -469,7 +469,7 @@ handleMessage_ handle hFile (msg:xs) pieceMap
 				return newPieceMap
 				-- >> do
 				--return ()
-		putStrLn $ "Percent complete (and verified): " ++ (show (100 * (fromIntegral $ bytesComplete result) / (fromIntegral $ bytesTotal result))) ++ "%"
+		putStrLn $ "Percent complete (verified): " ++ (show (100 * (fromIntegral $ bytesComplete result) / (fromIntegral $ bytesTotal result))) ++ "%"
 		putStrLn $ "Percent complete (including unverified blocks): " ++ (show (100 * ((fromIntegral $ bytesComplete result) + (fromIntegral $ bytesUnverified result)) / (fromIntegral $ bytesTotal result))) ++ "%"
 		return result
 	| msg == cancel = do
@@ -631,6 +631,7 @@ myForkIO io = do
 	return mvar
 
 parallelExec peers pieceMap info_hash hFile = do
+	putStrLn $ "Connecting to " ++ (show $ length peers) ++ " peers"
 	pauses <- mapM myF peers
 	mapM (takeMVar) pauses
 	--forever $ sequence pauses
@@ -641,21 +642,10 @@ parallelExec peers pieceMap info_hash hFile = do
 				res <- connectPeer peer $ BE.unpack info_hash
 				case res of
 					Right (handle, sock) -> do
-						putStrLn $ "connectPeer: " ++ (show peer)
+						putStrLn $ "connectPeer: " ++ (show $ addrAddress peer)
 						listenWith handle hFile pieceMap thread
 						return ()
 					Left e -> return ()
-		f peer = do
-			thread <- newMVar "test"
-			forkIO $ do
-				res <- connectPeer peer $ BE.unpack info_hash
-				case res of
-					Right (handle, sock) -> do
-						putStrLn $ "connectPeer: " ++ (show peer)
-						forkIO $ listenWith handle hFile pieceMap thread
-						return ()
-					Left e -> return ()
-			return $ putMVar thread "test"
 
 execTorrent (fileName:[]) = do
 	(torrent, url, rsp, trackerResp, peers, info_hash, resultFile, _pieceMap, hFile) <- preExecTorrent fileName
@@ -663,13 +653,17 @@ execTorrent (fileName:[]) = do
 	let i = 0
 	let info_hash = SHA1.hash $ BL.toStrict $ bPack $ torrent M.! "info"
 	parallelExec (take 50 peers) pieceMap info_hash hFile
-	--
+	{-- uncomment block for non-parallel, single peer
 	putStrLn $ "connectPeer: " ++ (show (peers !! i))
+	-- TODO: fix below pattern match, for errors
 	Right (handle, sock) <- connectPeer (peers !! i) $ BE.unpack info_hash
 	putStrLn "fork listen"
 	thread1 <- newMVar "test"
 	
 	listenWith handle hFile pieceMap thread1
+	--}
+	putStrLn "All peers disconnected"
+	--fClose hFile
 	return ()
 	--putStrLn "bitfieldMsg"
 	--bitfieldMsg handle
