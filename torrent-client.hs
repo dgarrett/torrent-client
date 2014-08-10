@@ -618,11 +618,14 @@ execTorrent (fileName:port:[]) = do
 	addrinfos <- getAddrInfo Nothing (Just "localhost") (Just port)
 	let serveraddr = addrinfos !! 3
 	putStrLn "connectPeer"
-	Right (handle, sock) <- connectPeer serveraddr $ BE.unpack info_hash
-	putStrLn "fork listen"
-	masterThread <- newMVar "test"
-	listenWith handle hFile pieceMap masterThread -- forkIO $ 
-	putStrLn "All peers disconnected"
+	connectRes <- connectPeer serveraddr $ BE.unpack info_hash
+	case connectRes of
+		Right (handle, sock) -> do
+			putStrLn "fork listen"
+			masterThread <- newMVar "test"
+			listenWith handle hFile pieceMap masterThread -- forkIO $ 
+			putStrLn "All peers disconnected"
+		Left err -> putStrLn $ show err
 	--putStrLn "bitfieldMsg"
 	--bitfieldMsg handle
 	--putStrLn "interestedMsg"
